@@ -1,0 +1,2803 @@
+---
+title: "ECHO_ERN_ERP_TF_ITPS_ICPS_R1"
+author: "Santi"
+date: "2/5/2019"
+output:
+  html_document:
+    toc: true
+    fig_height: 8.5
+    fig_width: 12
+    css: custom 2.css
+editor_options: 
+  chunk_output_type: console
+---
+
+This script performs the analayses showed in Morales et al. (under review). This script focuses only on the response-locked data from the Zoo task.
+The script start by organizing all the data and then performing the analyses. First the age-related analyses are done followed by the reliability analyses. 
+The script is more like a notebook rather than a script that can be run from start to finish. That would take too long because of the reliability analyses. 
+```{r, echo = FALSE}
+options(width = 160)
+options(knitr.table.format = "html")
+```
+
+# Setup
+```{r eval=TRUE, echo=T, message=FALSE, warning=FALSE, results='hide', fig.show='hide'}
+# Set working directory
+setwd("") 
+
+list.of.packages <- c("psych", "zoo", "reshape2", "car","taRifx", "ggplot2", "nlme", "R.matlab", "tidyverse","tidyr","dplyr","foreach", "doParallel","effsize")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+# Loading packages
+lapply(list.of.packages, require, character.only = TRUE)
+
+# Setting my plotting options
+my_opts <- list(theme_classic() + theme(axis.text=element_text(size=13), axis.title=element_text(size=14,face="bold"), legend.title=element_text(size=13,face="bold"), legend.text=element_text(size=12), strip.text.x = element_text(size = 13, face="bold")))
+source("/Users/santiagomorales/Dropbox/R_dropbox/data.check_function.R") # Reading in function from file
+############################################################
+
+# Options for parallel
+registerDoParallel(4)  # use multicore, set to the number of our cores
+opts <- list(chunkSize=2)
+
+```
+
+## Reading in all the datasets at once
+This step can take a bit of time so I am grouping all of them here
+```{r}
+# ERPs
+matlabFileERP  <- readMat('Y:/Projects/ECHO/ERP_Plotting/mat_files/Zoo_Resp_bln_corr_Data_300_100_04_04_2021.mat')
+
+# TF
+matlabFile_theta <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/Thetatf_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.mat')
+matlabFile_delta  <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/Deltatf_all_Zoo_Resp_1_4_3s_50Hz_04_30_2021.mat')
+
+# ITPS
+matlabFile_delta_ITPS  <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/DeltaITPS_all_Zoo_Resp_1_4_3s_50Hz_04_30_2021.mat')
+matlabFile_theta_ITPS  <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/ThetaITPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.mat')
+
+# ICPS
+matlabFile_delta_ICPS  <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/DeltaICPS_all_Zoo_Resp_1_4_3s_50Hz_04_30_2021.mat')
+matlabFile_theta_ICPS  <- readMat('Y:/Projects/ECHO/CSD_TimeFreqs/Output_data/R1/ThetaICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.mat')
+```
+
+## Reading and cleaning the covariates of interest
+```{r}
+#Behavioral variables
+zoo_beh <- read.csv("Z:/IndividualStudies/ECHO/DATA/ECHO_DATA/Preprocessed_Data/GNG_Zoo_ECHO_2020-03-17.csv", header = T, na.strings = "")
+zoo_beh$age <- as.numeric(gsub("Y", "", zoo_beh$Age))
+# Keeping only children with good behavioral data
+zoo_beh <- zoo_beh[zoo_beh$Percent_Acc>=.60 & zoo_beh$Ntrials>=160,]
+zoo_beh$id_age <- paste(zoo_beh$id, zoo_beh$Age, sep = "_") # Creating this variable to account for longitudinal data
+
+# List of participants to exclude based on behavioral performance
+ids.to.exclude <- read.csv("Y:/Projects/ECHO/Descriptives/ECHO_Zoo_Exclude.csv", header = F)
+ids.to.exclude <- c(as.character(ids.to.exclude$V1), c("EPSF_00739_A_7Y",  "EPSF_01138_A_5Y")) # Append these participants due to technical difficulties
+
+# Covariates from ECHO
+gender <- read.csv("Z:/IndividualStudies/ECHO/DATA/DataReceivedfromSF_10.2.19/Data/PASS/CSV/Data - Derive/adsc.csv", header = T) # Gender - variables of interest c("eid", "GENDER")
+covs <-  read.csv("Z:/IndividualStudies/ECHO/DATA/DataReceivedfromSF_10.2.19/Data/PASS/CSV/Data - Internal Derive/idimpexp.csv", header = T) # Looking at the classes
+age <- read.csv("Z:/IndividualStudies/ECHO/DATA/ECHO_DATA/EEG/SummaryReports/ECHO_DOBs.csv", header = T, na.strings = "") # Reading in the exact age
+age <- age[age$Age < 11 & age$Age > 3, ] # deleting 11 year olds
+age$id_age <- paste0(age$eid, "_", age$Age, "Y")
+age$id_age <- gsub("-", "_", age$id_age)
+
+# SES
+ses <- read.csv("Z:/IndividualStudies/ECHO/DATA/DataReceivedfromSF_10.2.19/Data/PASS/CSV/Data - Derive/adscmat.csv", header = T) # Looking at SES
+medu <- read.csv("Z:/IndividualStudies/ECHO/DATA/DataReceivedfromSF_10.2.19/Data/PASS/CSV/Data - Raw/q001.csv", header = T) # Looking at mother education
+fedu <- read.csv("Z:/IndividualStudies/ECHO/DATA/DataReceivedfromSF_10.2.19/Data/PASS/CSV/Data - Raw/q003.csv", header = T) # Looking at father education
+
+```
+
+# ERPs - ERN/Pe
+## Setup
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_ERP_Zoo_Resp_04_01_2020.csv", header = T, na.strings = "")
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+ids <- ids[ids$IncludedERP=="1" & !is.na(ids$IncludedERP),]
+trial_nums_df <- ids
+
+Fz <- c(4, 7, 54)
+Cz <- c(51, 41, 21, 16)
+Pz <- c(34, 36, 33, 38)
+
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(Fz, Cz, Pz)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFileERP$newData[,cond,chan,]))
+      names(df_temp) <- paste0("v", seq(-1000,1998, by = 2)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+
+# Melting the data for exploratory plotting and analyzes
+# Deleting some variables we do not need
+df$Subject <- NULL
+df$IncludedERP <- NULL
+
+# Selecting only a few of the channels that we care about 
+# df1 <- df[df$chan %in% c(4,6),]
+
+dfm <- melt(df, id=c("id", "age","Correct", "Error", "Site", "cond", "chan"))
+# dfm <- dfm[order(dfm$id, dfm$cond, dfm$chan),]
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -300 & dfm$time < 600,]
+
+# Labeling clusters
+dfm$Cluster <- ifelse(dfm$chan %in% Fz, "Fz", ifelse(dfm$chan %in% Cz, "Cz", ifelse(dfm$chan %in% Pz, "Pz", "ERROR!")))
+
+
+# Create difference scores
+df_w <- dfm %>% spread(cond, value)
+names(df_w)[names(df_w)=="Correct"] <- "N_Correct" # Changing the names of the conditions 
+names(df_w)[names(df_w)=="Error"] <- "N_Error" # Changing the names of the conditions 
+
+names(df_w)[names(df_w)=="1"] <- "Correct" # Changing the names of the conditions 
+names(df_w)[names(df_w)=="2"] <- "Error" # Changing the names of the conditions 
+df_w$Diff <- df_w$Error - df_w$Correct
+
+dfm <- df_w %>% gather(Condition, value, Correct, Error, Diff)
+
+# Because we have participants with two visits, we need to include age in their id
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+# Because we have participants with two visits, we need to include age in their id
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+dfm$id_age <- gsub("_11Y", "_11", dfm$id_age)
+
+
+# Limiting to the participants that only have one visit 
+ids.ERN <- read.csv("Z:/IndividualStudies/ECHO/DATA/ECHO_DATA/EEG/SummaryReports/ECHO_VisitNumber.csv", header = T)
+ids.ERN$id_age <- gsub("_1 ", "_11", ids.ERN$id)
+ids.ERN <- ids.ERN[ids.ERN$visitNum==1,] # Keeping only the participants with the first visit 
+
+length(unique(dfm$id_age))
+dfm <- dfm[dfm$id_age %in% ids.ERN$id_age,]
+length(unique(dfm$id_age)) # It seems like we had 18 participants with double visits
+ids.ERPs <- unique(dfm$id_age[!dfm$age %in% c("3Y","11Y")]) # Deleting 3yos and 11yos
+# It seems like they barely meet the cutoff and they do not get included in the "to_delete" script from Steph. Deleting them now:
+# ids.ERPs <- ids.ERPs[!ids.ERPs %in% c("EPRC_00346_A_4Y", "EPRC_00381_A_4Y", "EPSF_01283_A_4Y" ,"EPSF_01290_A_4Y" ,"EPSF_01690_A_4Y")]
+ids.ERPs <- ids.ERPs[!ids.ERPs %in% ids.to.exclude]
+
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+# write.csv(ids.ERPs, "~/Downloads/ECHO_ERN_IDS_Paper_01_06_2021.csv", row.names = F, quote = F)
+```
+
+## Plotting ERN and Pe for the whole sample
+```{r, eval= F}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + Cluster, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+dfm.ag$Condtion <- factor(dfm.ag$Condition, levels = c("Correct", "Error", "Diff"))
+
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + Cluster, dfm[dfm$age %in% c("4Y", "5Y", "7Y", "9Y"),], function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+dfm.ag$Condtion <- factor(dfm.ag$Condition, levels = c("Correct", "Error", "Diff"))
+ggplot(dfm.ag[dfm.ag$Cluster=="Fz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("Fz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Diff", "Error"), values=c("blue", "black", "red"))
+
+# Plots for paper 
+(p1.ern <- ggplot(dfm.ag[dfm.ag$Cluster=="Fz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1)  + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Error", "Diff"), values=c("blue", "red", "black"), labels = c("Correct", "Error", "Difference")) + theme(legend.position="none") )
+
+(p1.pe <- ggplot(dfm.ag[dfm.ag$Cluster=="Pz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=200, xmax=500, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1)  + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Error", "Diff"), values=c("blue", "red", "black"), labels = c("Correct", "Error", "Difference")) + theme(legend.position="none") )
+
+```
+
+## Plotting ERN and Pe by age
+```{r, eval= F}
+# Doing it by age
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + Cluster + age, dfm, function(x) mean(x, na.rm=T))
+dfm.ag$Condtion <- factor(dfm.ag$Condition, levels = c("Correct", "Error", "Diff"))
+dfm.ag$age <- factor(dfm.ag$age, levels = c("3Y", "4Y", "5Y", "7Y", "9Y", "11Y")) # Changing the order of the factors
+
+(ps1.ern.age <- ggplot(dfm.ag[dfm.ag$Cluster=="Fz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1)  + my_opts + facet_wrap(~age) + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Diff", "Error"), values=c("blue", "black", "red"), guide = NULL) + theme(legend.position="none") )
+
+ggplot(dfm.ag[dfm.ag$Cluster=="Cz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("Cz") + my_opts + facet_wrap(~age) + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Diff", "Error"), values=c("blue", "black", "red"))
+
+(ps1.pe.age <- ggplot(dfm.ag[dfm.ag$Cluster=="Pz",], aes(x =time,y=value)) +  geom_rect(aes(xmin=200, xmax=500, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1)  + my_opts + facet_wrap(~age) + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) +
+  scale_color_manual(breaks = c("Correct", "Diff", "Error"), values=c("blue", "black", "red"), guide = NULL) + theme(legend.position="none") )
+
+dfm.ag$Age <- factor(dfm.ag$age, levels = c("3Y", "4Y", "5Y", "7Y", "9Y", "11Y")) # Changing the order of the factors
+dfm.ag$Age <- gsub("Y", "",dfm.ag$age)
+
+ggplot(dfm.ag[dfm.ag$Cluster=="Fz" & dfm.ag$Condition == "Error" & (dfm.ag$age %in% c("4Y", "5Y", "7Y", "9Y")),], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Age), size=1) + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) 
+
+ggplot(dfm.ag[dfm.ag$Cluster=="Pz" & dfm.ag$Condition == "Error" & (dfm.ag$age %in% c("4Y", "5Y", "7Y", "9Y")),], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=200, xmax=500, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Age), size=1) + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V)) 
+
+
+```
+
+## Extracting the ERN and Pe
+```{r}
+ERN <- dfm[dfm$time >= 0 & dfm$time <= 100,]
+ERN <- aggregate(cbind(value) ~ id + id_age + Condition + Cluster, ERN, function(x) mean(x, na.rm=T))
+ERN <- dcast(ERN, id_age ~ Condition + Cluster, mean, value.var= c("value"))
+names(ERN)[-c(1)] <- paste0(names(ERN)[-c(1)], "_ERN")
+
+Pe <- dfm[dfm$time >= 200 & dfm$time <= 500,]
+Pe <- aggregate(cbind(value) ~ id + id_age +  Condition + Cluster, Pe, function(x) mean(x, na.rm=T))
+Pe <- dcast(Pe, id_age ~ Condition + Cluster, mean, value.var= c("value"))
+names(Pe)[-c(1)] <- paste0(names(Pe)[-c(1)], "_Pe")
+
+erp <- merge(ERN, Pe, by = "id_age", all = T )
+
+# Checking the peaks
+# ERN
+ERN.peak <- dfm[dfm$time >= 0 & dfm$time <= 100 & dfm$Cluster=="Fz",]
+ERN.peak <- aggregate(cbind(value) ~ id + id_age + time + Condition + Cluster, ERN.peak, function(x) mean(x, na.rm=T)) # Collapsing across channels and trials
+# ERN.peak <- aggregate(cbind(value) ~ id + Condition, ERN.peak, function(x) min(x, na.rm=T)) # Get the peak of the average wave
+ERN.peak <-  ERN.peak %>% group_by(id_age, Condition) %>% mutate(Peak_time = time[value == min(value,na.rm = T)]) %>% summarise(Peak = mean(Peak_time, na.rm = T))
+ERN.peak$age <- as.numeric(gsub("Y", "",sapply(strsplit(ERN.peak$id_age,"_"), `[`, 4)))
+describeBy(ERN.peak$Peak, ERN.peak[,c("age", "Condition")])
+t.test(ERN.peak$Peak[ERN.peak$age <7 & ERN.peak$Condition=="Error"], ERN.peak$Peak[ERN.peak$age >=7 & ERN.peak$Condition=="Error"],  data = ERN.peak)
+corr.test(ERN.peak[ERN.peak$Condition=="Error",c("age", "Peak")])
+corr.test(ERN.peak[ERN.peak$Condition=="Diff",c("age", "Peak")])
+ERN.peak <- dcast(ERN.peak, id_age ~ Condition, mean, value.var= c("Peak"))
+names(ERN.peak)[-c(1)] <- paste0(names(ERN.peak)[-c(1)], "_Peak.Lat_ERN")
+
+# Pe
+Pe.peak <- dfm[dfm$time >= 200 & dfm$time <= 500 & dfm$Cluster=="Pz",]
+Pe.peak <- aggregate(cbind(value) ~ id + id_age + time + Condition + Cluster, Pe.peak, function(x) mean(x, na.rm=T)) # Collapsing across channels and trials
+# Pe.peak <- aggregate(cbind(value) ~ id + Condition, Pe.peak, function(x) min(x, na.rm=T)) # Get the peak of the average wave
+Pe.peak <-  Pe.peak %>% group_by(id_age, Condition) %>% mutate(Peak_time = time[value == max(value,na.rm = T)]) %>% summarise(Peak = mean(Peak_time, na.rm = T))
+Pe.peak$age <- as.numeric(gsub("Y", "",sapply(strsplit(Pe.peak$id_age,"_"), `[`, 4)))
+describeBy(Pe.peak$Peak, Pe.peak[,c("age", "Condition")])
+t.test(Pe.peak$Peak[Pe.peak$age <7 & Pe.peak$Condition=="Error"], Pe.peak$Peak[Pe.peak$age >=7 & Pe.peak$Condition=="Error"],  data = Pe.peak)
+corr.test(Pe.peak[Pe.peak$Condition=="Error",c("age", "Peak")])
+corr.test(Pe.peak[Pe.peak$Condition=="Diff",c("age", "Peak")])
+Pe.peak <- dcast(Pe.peak, id_age ~ Condition, mean, value.var= c("Peak"))
+names(Pe.peak)[-c(1)] <- paste0(names(Pe.peak)[-c(1)], "_Peak.Lat_Pe")
+
+erp.peak <- merge(ERN.peak, Pe.peak, by = "id_age", all = T )
+
+```
+
+# TF
+## Power
+### Delta Power
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is the new check
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+
+# Fz <- c(8, 6, 3, 9, 4, 7, 54)
+Fz <- c(4, 7, 54)
+Cz <- c(51, 41, 21, 16)
+Pz <- c(34, 36, 33, 38)
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(Fz)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFile_delta$Deltatf.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time, data = dfm, mean)
+
+## Doing Loess Curves
+(p1.TF.delta <- ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Delta Power (dB)") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+
+# Checking the significance 
+Delta_resp <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Delta_resp <- aggregate(cbind(value) ~ id_age + Condition, Delta_resp, function(x) mean(x, na.rm=T))
+Delta_resp <- dcast(Delta_resp, id_age ~ Condition, mean, value.var= c("value"))
+names(Delta_resp)[-1] <- paste0(names(Delta_resp)[-1], "_Delta")
+
+```
+
+### Theta Power
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is for the R1 -500 to -300 bln
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+
+# Fz <- c(8, 6, 3, 9, 4, 7, 54)
+Fz <- c(4, 7, 54)
+Cz <- c(51, 41, 21, 16)
+Pz <- c(34, 36, 33, 38)
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(Fz)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFile_theta$Thetatf.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time, data = dfm, mean)
+
+## Doing Loess Curves
+(p1.TF.theta <- ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Theta Power (dB)") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Checking the significance 
+Theta_resp <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Theta_resp <- aggregate(cbind(value) ~ id_age + Condition, Theta_resp, function(x) mean(x, na.rm=T))
+Theta_resp <- dcast(Theta_resp, id_age ~ Condition, mean, value.var= c("value"))
+names(Theta_resp)[-1] <- paste0(names(Theta_resp)[-1], "_Theta")
+
+```
+
+
+
+## ITPS
+### Delta ITPS
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is for the R1 -500 to -300 bln
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+Fz <- c(4, 7, 54)
+Cz <- c(51, 41, 21, 16)
+Pz <- c(34, 36, 33, 38)
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(Fz)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFile_delta_ITPS$DeltaITPS.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time, data = dfm, mean)
+
+## Doing Loess Curves
+(p1.ITPS.delta <- ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Delta ITPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Checking the significance 
+Delta_itps <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Delta_itps <- aggregate(cbind(value) ~ id_age + Condition, Delta_itps, function(x) mean(x, na.rm=T))
+
+t.test(value ~ Condition, paired = T, data = Delta_itps) # Non-Significant Delta effect
+
+# Extracting delta
+Delta_itps <- dcast(Delta_itps, id_age ~ Condition, mean, value.var= c("value"))
+names(Delta_itps)[-1] <- paste0(names(Delta_itps)[-1], "_Delta_itps")
+
+```
+
+### Theta ITPS 
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is for the R1 -500 to -300 bln
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+
+Fz <- c(4, 7, 54)
+Cz <- c(51, 41, 21, 16)
+Pz <- c(34, 36, 33, 38)
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(Fz)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFile_theta_ITPS$ThetaITPS.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+# dfm <- dfm[order(dfm$id, dfm$cond, dfm$chan),]
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time, data = dfm, mean)
+
+## Doing Loess Curves
+(p1.ITPS.theta <- ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Theta ITPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Checking the significance 
+Theta_itps <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Theta_itps <- aggregate(cbind(value) ~ id_age + Condition, Theta_itps, function(x) mean(x, na.rm=T))
+
+# Extracting theta
+Theta_itps <- dcast(Theta_itps, id_age ~ Condition, mean, value.var= c("value"))
+names(Theta_itps)[-1] <- paste0(names(Theta_itps)[-1], "_Theta_itps")
+
+```
+
+## ICPS
+### Delta ICPS
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is for the R1 -500 to -300 bln
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+rFl <- c(60, 59) # just limiting to two elecs Frontal
+lFl <- c(12, 13) # just limiting to two elecs Frontal
+rCl <- c(49, 50) # just limiting to two elecs Central
+lCl <- c(20, 22) # just limiting to two elecs Central
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(rFl, lFl, rCl, lCl)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan))
+      df_temp <- as.data.frame(unlist(matlabFile_delta_ICPS$DeltaICPS.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+dfm$Cluster <- ifelse(dfm$chan %in% c(rFl, lFl), "Frontal", ifelse(dfm$chan %in% c(rCl, lCl), "Central", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time + Cluster, data = dfm, mean)
+
+## Doing Loess Curves
+ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Delta ICPS") + my_opts + facet_wrap(~Cluster) + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL)
+(p1.ICPS.delta <- ggplot(df.ag[df.ag$Cluster=="Frontal",], aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Delta ICPS") + my_opts  + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Checking the significance 
+Delta_icps <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Delta_icps <- aggregate(cbind(value) ~ id_age + Condition + Cluster, Delta_icps, function(x) mean(x, na.rm=T))
+# Extracting delta
+Delta_icps <- dcast(Delta_icps, id_age ~ Condition + Cluster, mean, value.var= c("value"))
+names(Delta_icps)[-1] <- paste0(names(Delta_icps)[-1], "_Delta_icps")
+
+```
+
+### Theta ICPS
+```{r}
+ids <- read.csv("Y:/Projects/ECHO/Descriptives/Trial_Numbers_tf_ITPS_ICPS_all_Zoo_Resp_4_8_3s_50Hz_04_30_2021.csv", header = T, na.strings = "") # This is for the R1 -500 to -300 bln
+ids$Subject <- as.character(ids$Subject)
+ids$Site <- sapply(strsplit(ids$Subject,"_"), `[`, 1)
+ids$id <- paste0(sapply(strsplit(ids$Subject,"_"), `[`, 1), "_", sapply(strsplit(ids$Subject,"_"), `[`, 2), "_", sapply(strsplit(ids$Subject,"_"), `[`, 3))
+ids$age <- sapply(strsplit(ids$Subject,"_"), `[`, 4)
+
+rFl <- c(60, 59) # just limiting to two elecs Frontal
+lFl <- c(12, 13) # just limiting to two elecs Frontal
+rCl <- c(49, 50) # just limiting to two elecs Central
+lCl <- c(20, 22) # just limiting to two elecs Central
+
+df <- data.frame()
+for (cond in 1:2) {
+  for (chan in 1:60) {
+    if (chan %in% c(rFl, lFl, rCl, lCl)) {
+      print(paste0("Now in Condition ", cond, " Channel ", chan)) 
+      df_temp <- as.data.frame(unlist(matlabFile_theta_ICPS$ThetaICPS.all[,cond,,chan])) # This is for the R1 -500 to -300 bln
+      names(df_temp) <- paste0("v", seq(-1000,1980, by = 20)) # After renaming maybe I can just use gsub to create a time variable
+      df_temp$cond <- cond
+      df_temp$chan <- chan
+      df_temp <- cbind(ids, df_temp)
+      df <- rbind(df, df_temp)
+    }
+  }
+}
+
+df$Subject <- NULL
+dfm <- melt(df, id=c("id", "cond", "chan",  "Site", "age"))
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable)))
+
+
+dfm$Condition <- ifelse(dfm$cond=="1", "Correct", ifelse(dfm$cond=="2", "Error", "ERROR!"))
+dfm$Cluster <- ifelse(dfm$chan %in% c(rFl, lFl), "Frontal", ifelse(dfm$chan %in% c(rCl, lCl), "Central", "ERROR!"))
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 600,]
+
+df.ag <- aggregate(value ~ Condition + time + Cluster, data = dfm, mean)
+
+## Doing Loess Curves
+ggplot(df.ag, aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Theta ICPS") + my_opts + facet_wrap(~Cluster) + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL)
+(p1.ICPS.theta <- ggplot(df.ag[df.ag$Cluster=="Frontal",], aes(x=time, y=value)) + geom_rect(aes(xmin=0, xmax=300, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + geom_smooth(method=loess, aes(color = Condition), se=F)  + labs(x = "Time", y = "Theta ICPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Checking the significance 
+Theta_icps <- dfm[dfm$time >= 0 & dfm$time <= 300,]
+Theta_icps <- aggregate(cbind(value) ~ id_age + Condition + Cluster, Theta_icps, function(x) mean(x, na.rm=T))
+Theta_icps_peak <- aggregate(cbind(value) ~ id_age + Condition + Cluster, Theta_icps, function(x) max(x, na.rm=T))
+
+
+t.test(value ~ Condition, paired = T, data = Theta_icps) # Significant effect of icps, but in the opposite direction? 
+
+# Extracting theta
+Theta_icps <- dcast(Theta_icps, id_age ~ Condition + Cluster, mean, value.var= c("value"))
+names(Theta_icps)[-1] <- paste0(names(Theta_icps)[-1], "_Theta_icps")
+
+
+Theta_icps$Dif_Fz_Error_Central_Theta_icps <- Theta_icps$Error_Central_Theta_icps - Theta_icps$Correct_Central_Theta_icps
+Theta_icps$Dif_Fz_Error_Frontal_Theta_icps <- Theta_icps$Error_Frontal_Theta_icps - Theta_icps$Correct_Frontal_Theta_icps
+t.test(Theta_icps$Dif_Fz_Error_Central_Theta_icps, Theta_icps$Dif_Fz_Error_Frontal_Theta_icps, paired = T)
+
+```
+
+# Merging 
+```{r}
+# Merging ERPs with Behavior
+# dfmerged <- merge(zoo_beh, EF_touch, by = "id_age", all = T)
+dfmerged <- zoo_beh
+
+# dfmerged$Site <- sapply(strsplit(as.character(dfmerged$id.y,"_")), `[`, 1) # Not dealing with this for now
+
+# Merging with the larger dataset
+dfmerged$id_age <- substring(dfmerged$id_age, 1, 15)
+# vars <- c("Deviant", "Deviant_late", "Novel", "Standard_Deviant", "Standard_late", "Standard_Novel",
+#           "Deviant_Fz_Alpha", "Deviant_Tz_Theta", "Novel_Fz_Theta", "Novel_Tz_Theta", "Standard_Fz_Theta", "Standard_Tz_Theta", "Dif_Fz_Novel_Theta",
+#           "Deviant_Fz_Alpha", "Deviant_Tz_Alpha", "Novel_Fz_Alpha", "Novel_Tz_Alpha", "Standard_Fz_Alpha", "Standard_Tz_Alpha", "Dif_Fz_Novel_Alpha",
+#           "Deviant_Fz_Theta_itps", "Deviant_Tz_Theta_itps", "Novel_Fz_Theta_itps", "Novel_Tz_Theta_itps", "Standard_Fz_Theta_itps", "Standard_Tz_Theta_itps", "Dif_Fz_Novel_Theta_itps",
+#           "Deviant_Fz_Alpha_itps", "Deviant_Tz_Alpha_itps", "Novel_Fz_Alpha_itps", "Novel_Tz_Alpha_itps", "Standard_Fz_Alpha_itps", "Standard_Tz_Alpha_itps", "Dif_Fz_Novel_Alpha_itps")
+# dfmerged <- dfmerged[, !names(dfmerged) %in% vars]
+erp$id_age <- substring(erp$id_age, 1, 15)
+dfmerged <- merge(dfmerged, erp, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Theta_resp, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Delta_resp, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Theta_itps, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Delta_itps, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Theta_icps, by = "id_age", all = T)
+dfmerged <- merge(dfmerged, Delta_icps, by = "id_age", all = T)
+
+dfmerged <- merge(dfmerged, erp.peak, by = "id_age", all = T)
+
+
+# Keeping only participants who are in their first visit and have ERPs
+dfmerged <- dfmerged[dfmerged$id_age %in% ids.ERPs,]
+
+
+# Adding number of trials
+# trial_nums_df$age <- as.numeric(gsub("Y","", trial_nums_df$age ))
+trial_nums_df$id_age <- paste(trial_nums_df$id, trial_nums_df$age, sep = "_")
+trial_nums_df$id_age <- substring(trial_nums_df$id_age, 1, 15)
+names(trial_nums_df)[names(trial_nums_df) %in% c("Correct","Error")] <- paste0(names(trial_nums_df)[names(trial_nums_df) %in% c("Correct","Error")], "_", "Trial_Num")
+trial_nums_df <- trial_nums_df[trial_nums_df$id_age %in% ids.ERPs,]
+# describe(trial_nums_df[c("Stan_Trial_Num", "Dev_Trial_Num", "Nov_Trial_Num")])
+dfmerged <- merge(dfmerged, trial_nums_df[c("Correct_Trial_Num", "Error_Trial_Num", "id_age")], by = "id_age", all = T)
+
+
+# Adding other covariates
+# Mom characteristics like psychopathology or education
+dfmerged$id <- paste(sapply(strsplit(dfmerged$id_age,"_"), `[`, 1), sapply(strsplit(dfmerged$id_age,"_"), `[`, 2), sapply(strsplit(dfmerged$id_age,"_"), `[`, 3), sep = "_")
+dfmerged$eid <- gsub("_", "-", dfmerged$id) # Creating different ids for merging
+dfmerged$eid_s <- paste0(sapply(strsplit(dfmerged$eid,"-"), `[`, 1), "-", sapply(strsplit(dfmerged$eid,"-"), `[`, 2)) # Creating mom id for merging with mom characteristics
+
+# Merging - Careful how you merge because there are two ids for the mom and the kid.
+dfmerged <- merge(dfmerged, gender[,c("eid", "gender2", "INFRACENIH4", "INFRACEAI4", "EDC")], by = "eid", all.x = T)
+dfmerged <- merge(dfmerged, covs, by = "eid_s", all.x = T)
+dfmerged <- merge(dfmerged, ses[,c("eid_s","Inc_PP")], by = "eid_s", all.x = T)
+dfmerged <- merge(dfmerged, medu[,c("eid_s","Q1_2")], by = "eid_s", all.x = T)
+dfmerged <- merge(dfmerged, fedu[,c("eid_s","Q3_3_1", "Q3_3_2")], by = "eid_s", all.x = T)
+dfmerged <- merge(dfmerged, age[,c("Age", "Visit_Date", "child_dob", "Age_C", "id_age")], by = "id_age", all.x = T)
+
+```
+
+# Number of trials
+```{r}
+# Describing the number of trials
+describe(dfmerged[, c("Correct_Trial_Num", "Error_Trial_Num")])
+describeBy(dfmerged[, c("Correct_Trial_Num", "Error_Trial_Num")], dfmerged$age)
+
+# Based on a reviewer comment, I also need to figure out the percent of data rejected
+## I think that can be the number of trials they completed and the number of trials included in the EEG
+dfmerged$Per_trials_rej_total <- ((dfmerged$Ntrials - (dfmerged$Correct_Trial_Num + dfmerged$Error_Trial_Num) )/dfmerged$Ntrials)*100
+dfmerged$Per_trials_rej_correct <- (( dfmerged$Correct_N_Go - dfmerged$Correct_Trial_Num )/dfmerged$Correct_N_Go )*100
+dfmerged$Per_trials_rej_error <- ((dfmerged$Errors_N_NoGo - dfmerged$Error_Trial_Num )/dfmerged$Errors_N_NoGo)*100
+
+describeBy(dfmerged[, c("Per_trials_rej_total", "Per_trials_rej_correct", "Per_trials_rej_error")], dfmerged$age)
+
+```
+
+# Age models
+## Trial differences by age
+```{r}
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Trial_Num", "Error_Trial_Num")], id.vars = c("id_age","gender2"))
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Trial_Num")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+
+anova(lme(fixed = value ~  age*variable, random= ~ 1 + variable |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~  age*variable, random= ~ 1 + variable |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+anova(lme(fixed = value ~  age, random= ~ 1 |id_age, data=dfm[dfm$variable=="Correct_Trial_Num",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~  age, random= ~ 1 |id_age, data=dfm[dfm$variable=="Correct_Trial_Num",], na.action = na.omit, method = "ML"))
+
+anova(lme(fixed = value ~  age, random= ~ 1 |id_age, data=dfm[dfm$variable=="Error_Trial_Num",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~  age, random= ~ 1 |id_age, data=dfm[dfm$variable=="Error_Trial_Num",], na.action = na.omit, method = "ML"))
+```
+
+## ERPs
+```{r}
+# ERN
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Fz_ERN", "Error_Fz_ERN", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Fz_ERN")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "", y = expression(Amplitude~~to~~Response~~mu~V)) + my_opts
+
+# Linear
+(p2.ern.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = expression(Amplitude~~to~~Response~~mu~V)) + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+# Pe
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Pz_Pe", "Error_Pz_Pe", "Error_Trial_Num", "Correct_Trial_Num","Age_C")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num","Age_C"))
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Pz_Pe")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1 |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1 |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age_factor*Condition, random= ~ 1 |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + Age_C*Condition, random= ~ 1 |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1 |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1 + variable |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1 + variable |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "", y = expression(Amplitude~~to~~Response~~mu~V)) + my_opts
+
+# Linear
+(p2.pe.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = expression(Amplitude~~to~~Response~~mu~V)) + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) )
+
+
+#####   #####   #####   #####   #####   #####   #####   #####   #####   #####   
+# Checking the peaks
+describe(dfmerged[,c("Correct_Peak.Lat_ERN", "Error_Peak.Lat_ERN")])
+# ERN
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Peak.Lat_ERN", "Error_Peak.Lat_ERN", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Peak.Lat_ERN")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Linear
+ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Peak Latency (ms) of ERN") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL)
+
+
+# Pe
+describe(dfmerged[,c("Correct_Peak.Lat_Pe", "Error_Peak.Lat_Pe")])
+
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Peak.Lat_Pe", "Error_Peak.Lat_Pe", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Peak.Lat_Pe")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Linear
+ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Peak Latency (ms) of Pe") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL)
+
+```
+
+## TF
+### Delta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Error_Delta", "Correct_Delta", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+# dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+# dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Delta")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+# Focused on Fz 
+# Both conditions
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age_factor*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(Condition, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Delta Power") + my_opts
+
+# Linear
+(p2.TF.delta.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Delta Power (dB)") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) ) # + coord_cartesian(ylim = c(-.2, 1.5))
+
+```
+
+### Theta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Error_Theta", "Correct_Theta", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+# dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+# dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Theta")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+# Focused on Fz 
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age_factor*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Theta Power") + my_opts
+
+# Linear
+(p2.TF.theta.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Theta Power (dB)") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) ) # + coord_cartesian(ylim = c(-.4, 1.5))
+
+```
+
+## ITPS
+### Delta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Error_Delta_itps", "Correct_Delta_itps", "Error_Trial_Num", "Correct_Trial_Num","Age_C")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num","Age_C"))
+# dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+# dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Delta_itps")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+# Focused on Fz 
+# Both conditions
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age_factor*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + Age_C*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Delta Power") + my_opts
+
+# Linear
+(p2.ITPS.delta.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Delta ITPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) ) # + coord_cartesian(ylim = c(0, .07))
+
+```
+
+### Theta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Error_Theta_itps", "Correct_Theta_itps", "Error_Trial_Num", "Correct_Trial_Num","Age_C")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num","Age_C"))
+# dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+# dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$variable <- relevel(as.factor(dfm$variable), ref="Correct_Theta_itps")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+# Focused on Fz 
+# Both conditions
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + Age_C*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm, na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Theta Power") + my_opts
+
+# Linear
+(p2.ITPS.theta.age <- ggplot(dfm, aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Theta ITPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) ) # + coord_cartesian(ylim = c(0, .05))
+
+```
+
+## ICPS
+### Delta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Central_Delta_icps", "Correct_Frontal_Delta_icps", "Error_Central_Delta_icps", "Error_Frontal_Delta_icps", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$Condition <- relevel(as.factor(dfm$Condition), ref="Correct")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+
+# Focused on Frontal
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age_factor*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Delta ICPS") + my_opts + facet_wrap(~Cluster) 
+
+# Linear
+ggplot(dfm, aes(age, value, fill = variable, color = variable)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Delta ICPS") + my_opts + facet_wrap(~Cluster) 
+(p2.ICPS.delta.age <- ggplot(dfm[dfm$Cluster=="Frontal",], aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Delta ICPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) ) # + coord_cartesian(ylim = c(-.005, .04))
+
+```
+
+### Theta
+```{r}
+#####
+# No time
+dfm <- melt(dfmerged[,c("id_age", "gender2", "Correct_Central_Theta_icps", "Correct_Frontal_Theta_icps", "Error_Central_Theta_icps", "Error_Frontal_Theta_icps", "Error_Trial_Num", "Correct_Trial_Num")], id.vars = c("id_age","gender2", "Error_Trial_Num", "Correct_Trial_Num"))
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$Cluster <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 2)
+dfm$Condition <- relevel(as.factor(dfm$Condition), ref="Correct")
+dfm$age <- sapply(strsplit(dfm$id_age,"_"), `[`, 4)
+dfm$age <- as.numeric(gsub("Y","", dfm$age))
+dfm$Site <- sapply(strsplit(dfm$id_age,"_"), `[`, 1)
+dfm$Condition <- sapply(strsplit(as.character(dfm$variable),"_"), `[`, 1)
+dfm$age_factor <- as.factor(dfm$age)
+
+ 
+# Focused on Frontal
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age + Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+
+anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+# anova(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2*age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+summary(lme(fixed = value ~ Error_Trial_Num + Correct_Trial_Num + Site + gender2 + age*Condition, random= ~ 1  |id_age, data=dfm[dfm$Cluster=="Frontal",], na.action = na.omit, method = "ML"))
+# Categorical
+ggplot(dfm, aes(variable, value, fill = as.factor(age))) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Age", y = "Theta ICPS") + my_opts + facet_wrap(~Cluster) 
+
+# Linear
+ggplot(dfm, aes(age, value, fill = variable, color = variable)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Theta ICPS") + my_opts + facet_wrap(~Cluster) 
+(p2.ICPS.theta.age <- ggplot(dfm[dfm$Cluster=="Frontal",], aes(age, value, fill = Condition, color = Condition)) + geom_smooth(method = lm) + labs(x = "Age (Years)", y = "Theta ICPS") + my_opts + scale_color_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL) + scale_fill_manual("",breaks = c("Correct", "Error"), labels=c("Correct", "Error"), values=c("blue", "red"), guide = NULL)  ) # + coord_cartesian(ylim = c(-.01, .02))
+
+```
+
+## Descriptives & missing bias
+```{r}
+whole.samp <- read.csv("Z:/IndividualStudies/ECHO/DATA/ECHO_DATA/ECHO_ERN_TF_ITPS_demographics.csv")
+# Adding demographics - maternal education and ethnicity
+whole.samp$id_age <- as.character(whole.samp$ID)
+
+# Mom characteristics like psychopathology or education
+whole.samp$id <- paste(sapply(strsplit(whole.samp$id_age,"_"), `[`, 1), sapply(strsplit(whole.samp$id_age,"_"), `[`, 2), sapply(strsplit(whole.samp$id_age,"_"), `[`, 3), sep = "_")
+whole.samp$eid <- gsub("_", "-", whole.samp$id) # Creating different ids for merging
+whole.samp$eid_s <- paste0(sapply(strsplit(whole.samp$eid,"-"), `[`, 1), "-", sapply(strsplit(whole.samp$eid,"-"), `[`, 2)) # Creating mom id for merging with mom characteristics
+
+# Merging - Careful how you merge because there are two ids for the mom and the kid.
+whole.samp <- merge(whole.samp, gender[,c("eid", "gender2", "INFRACENIH4", "INFRACEAI4", "EDC")], by = "eid", all.x = T)
+whole.samp <- merge(whole.samp, birthwt, by = "eid", all.x = T)
+whole.samp <- merge(whole.samp, ses[,c("eid_s","Inc_PP")], by = "eid_s", all.x = T)
+whole.samp <- merge(whole.samp, medu[,c("eid_s","Q1_2")], by = "eid_s", all.x = T)
+whole.samp$ERN.missing <- ifelse(whole.samp$id %in% dfmerged$id, "Not Missing", "Missing")
+
+######  ######
+# Descriptives
+table(whole.samp$Race_Ethnicity[whole.samp$ERN.missing=="Not Missing"], exclude = NULL)
+round(prop.table(table(whole.samp$Race_Ethnicity[whole.samp$ERN.missing=="Not Missing"], exclude = NULL))*100, 1)
+whole.samp$Q1_2 <- as.numeric(as.character(whole.samp$Q1_2))
+describe(whole.samp$Q1_2[whole.samp$ERN.missing=="Not Missing"])
+describe(whole.samp$Age[whole.samp$ERN.missing=="Not Missing"])
+describeBy(whole.samp$Age[whole.samp$ERN.missing=="Not Missing"], whole.samp$Age[whole.samp$ERN.missing=="Not Missing"])
+
+# Maternal education
+t.test(Q1_2 ~ ERN.missing, data = whole.samp)
+t.test(Q1_2 ~ EEG_attempted, data = whole.samp)
+t.test(Q1_2 ~ ERN.missing, data = whole.samp[whole.samp$Zoo_attempted==1,])
+
+t.test(birthwt4 ~ ERN.missing, data = whole.samp)
+t.test(birthwt4 ~ ERN.missing, data = whole.samp[whole.samp$Zoo_attempted==1,])
+
+t.test(birthwt4 ~ EEG_attempted, data = whole.samp)
+
+# Ethnicity
+table(whole.samp$Race_Ethnicity)
+whole.samp$Race_Ethnicity_recode <- ifelse(whole.samp$Race_Ethnicity == "White", "White", "Other") # Recoding white vs other
+table(whole.samp$Race_Ethnicity_recode, whole.samp$ERN.missing)
+chisq.test(table(whole.samp$Race_Ethnicity_recode, whole.samp$ERN.missing))
+chisq.test(table(whole.samp$Race_Ethnicity_recode, whole.samp$EEG_attempted))
+with(whole.samp[whole.samp$Zoo_attempted==1,], chisq.test(table(Race_Ethnicity_recode, ERN.missing)))
+
+# Age 
+t.test(Age ~ ERN.missing, data = whole.samp)
+t.test(Age ~ ERN.missing, data = whole.samp[whole.samp$Zoo_attempted==1,])
+
+# Gender 
+chisq.test(table(whole.samp$Gender, whole.samp$ERN.missing))
+with(whole.samp[whole.samp$Zoo_attempted==1,], chisq.test(table(Gender, ERN.missing)))
+
+# unfortunately, it looks like there is sampling bias such that we lose minority and children from less educated mothers at each step of the way
+
+# Getting the exact age
+describe(dfmerged$Age_C)
+describeBy(dfmerged$Age_C, dfmerged$age)
+dfmerged$id_age[is.na(dfmerged$Age_C)]
+
+# Describing the means for each measure of interest at each age 
+vars <- c("Error_Fz_ERN","Correct_Fz_ERN", "Error_Pz_Pe","Correct_Pz_Pe", "Error_Delta", "Correct_Delta", "Error_Theta", "Correct_Theta", "Error_Delta_itps", "Correct_Delta_itps", "Error_Theta_itps", "Correct_Theta_itps",  "Error_Frontal_Delta_icps", "Correct_Frontal_Delta_icps", "Error_Frontal_Theta_icps", "Correct_Frontal_Theta_icps")
+describeBy(dfmerged["Error_Fz_ERN"], dfmerged$age)
+
+# This is a quick way for copy paste 
+round(do.call("rbind",describeBy(dfmerged["Correct_Frontal_Theta_icps"], dfmerged$age))$mean,3)
+```
+
+# Saving plots 
+```{r}
+# This is done in Santi's laptop
+setwd("~/Documents/ECHO_ERN_Figures/redo/")
+# ERPs
+p1.ern
+ggsave("p1.ern.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p1.pe
+ggsave("p1.pe.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+ps1.ern.age
+ggsave("ps1.ern.age.R1.tiff", width = 7.3, height = 4.7, units = 'in')
+ps1.pe.age
+ggsave("ps1.pe.age.R1.tiff", width = 7.3, height = 4.7, units = 'in')
+p2.ern.age
+ggsave("p2.ern.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.pe.age
+ggsave("p2.pe.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+
+#TF
+p1.TF.delta
+ggsave("p1.TF.delta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p1.TF.theta
+ggsave("p1.TF.theta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.TF.delta.age
+ggsave("p2.TF.delta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.TF.theta.age
+ggsave("p2.TF.theta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+
+#ITPS
+p1.ITPS.delta
+ggsave("p1.ITPS.delta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p1.ITPS.theta
+ggsave("p1.ITPS.theta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.ITPS.delta.age
+ggsave("p2.ITPS.delta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.ITPS.theta.age
+ggsave("p2.ITPS.theta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+
+#ICPS
+p1.ICPS.delta
+ggsave("p1.ICPS.delta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p1.ICPS.theta
+ggsave("p1.ICPS.theta.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.ICPS.delta.age
+ggsave("p2.ICPS.delta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+p2.ICPS.theta.age
+ggsave("p2.ICPS.theta.age.R1.tiff", width = 5.2, height = 4.375, units = 'in')
+
+```
+
+# Reliability
+## ERPs
+### ECHO Setup
+```{r}
+# Creating a list of the matlab files 
+tbt_data_path <- "Y:/Projects/ECHO/ERP_Plotting/Trial_by_Trial/R1/" # This is the new one R1 with new baseline
+
+
+matlab_list <- list.files(path = tbt_data_path, pattern = ".mat", ignore.case = T)
+matlab_list <- matlab_list[!grepl("_Cz.mat", matlab_list)]
+
+event_list <- list.files(path = tbt_data_path, pattern = ".csv", ignore.case = T)
+
+df <- list()
+for (i in 1:length(matlab_list)) { 
+    mat_file_name <- matlab_list[i]
+    chan <- sapply(strsplit(as.character(mat_file_name),"_"), `[`, 5)
+    chan <- gsub(".mat", "", chan)
+    id <- paste(sapply(strsplit(as.character(mat_file_name),"_"), `[`, 1), 
+                sapply(strsplit(as.character(mat_file_name),"_"), `[`, 2), 
+                sapply(strsplit(as.character(mat_file_name),"_"), `[`, 3), 
+                sapply(strsplit(as.character(mat_file_name),"_"), `[`, 4), sep = "_")
+
+    event_file_name <- event_list[grep(id, event_list)]
+    print(paste0("Now in ", mat_file_name, "; ", event_file_name))
+
+    
+    matlabFile <- readMat(paste0(tbt_data_path,mat_file_name)) # Reading in matlab file
+    eventFile <- read.csv(paste0(tbt_data_path,event_file_name), header = T, na.strings = "NaN") # Reading in event file
+    df_temp <- as.data.frame(t(unlist(matlabFile$NewEpochs)))
+    names(df_temp) <- paste0("v", seq(-1000,1990, by = 10)) # After renaming maybe I can just use gsub to create a time variable 
+    df_temp$trial <- seq(1,nrow(df_temp))
+    df_temp <- cbind(eventFile, df_temp)
+    df_temp$age <- as.factor(df_temp$age)
+    df_temp$chan <- chan
+    # df <- bind_rows(df, df_temp)
+    df[[i]] <- df_temp
+}
+
+df <- do.call(dplyr::bind_rows, df)
+
+# Deleting some variables we do not need
+df$latency <- NULL
+df$urevent <- NULL
+df$duration <- NULL
+df$epoch <- NULL
+
+# Removing the "bad" trials
+df <- df[df$Bad=="0",]
+
+
+df <- df[, !names(df) %in% c("type", "value", "codes", "init_index", "init_time", "Task", 
+"StimType", "PrevGoNogo", "NextGoNogo", "BlockNum", 
+"TrialNum_idx", "Responded", "PrevResponded", "NextResponded", 
+"PrevAccuracy", "NextAccuracy", "RT", "PrevRT", "NextRT", "Bad", 
+"PrevBad", "NextBad", "Congruency", "PrevCongruency", "NextCongruency", "PrevTone", "NumOfPrevTone",
+"description", 
+"begintime", "classid", "code", "label", "relativebegintime", 
+"sourcedevice", "mffkey_age_", "mffkey_exp_", "mffkey_hand", 
+"mffkey_sex_", "mffkey_subj", "mffkey_cel", "mffkey_obs", "mffkey_spc", 
+"mffkey_pos", "mffkey_argu", "mffkey_rsp", "mffkey_eval", "mffkey_rtim", 
+"mffkey_trl", "mffkey_gidx", "mffkey_blk", "mffkey_corG", "mffkey_corN", 
+"mffkey_acc", "mffkey_cres", "mffkey_type", "mffkey_ernN", "mffkeys", "mffkeysbackup")]
+
+vars <- c("Accuracy", "GoNogo",  "id", "age", "TrialNum", "trial", "chan")
+dfm <- melt(df, id=vars) # You should not get a warning here
+dfm$time <- as.numeric(as.character(gsub("v", "", dfm$variable))) # You should not get a warning here 
+dfm$value <- as.numeric(dfm$value)
+
+# Limiting the time that I keep 
+dfm <- dfm[dfm$time > -200 & dfm$time < 500,]
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$Accuracy=="0" & dfm$GoNogo=="2", "Error", ifelse(dfm$Accuracy=="1" & dfm$GoNogo=="1", "Correct", "ERROR!"))
+
+# Keeping only participants that have enough trials and do not have double visits
+dfm$id_age <- paste(dfm$id, dfm$age, sep = "_")
+dfm$id_age <- gsub("_11Y", "_11", dfm$id_age)
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) #
+```
+
+### ECHO Creating plots
+```{r}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + chan, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag[dfm.ag$chan=="FCz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=0, xmax=100, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("FCz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V))
+
+ggplot(dfm.ag[dfm.ag$chan=="Pz",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=200, xmax=500, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("Pz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = expression(Amplitude~~to~~Response~~mu~V))
+```
+  
+### Extracting
+Selecting out the time of interest
+```{r}
+ERN <- dfm[dfm$chan=="FCz" & dfm$time >= 0 & dfm$time <= 100,]
+ERN <- aggregate(cbind(value) ~ id + id_age + age + Condition + TrialNum + trial, ERN, function(x) mean(x, na.rm=T))
+ERN$Condition <- car::recode(ERN$Condition, " 'Error'='Error_ERN';'Correct'='Correct_ERN'")
+
+
+Pe <- dfm[dfm$chan=="Pz" & dfm$time >= 200 & dfm$time <= 500,]
+Pe <- aggregate(cbind(value) ~ id + id_age + age + Condition + TrialNum + trial, Pe, function(x) mean(x, na.rm=T))
+Pe$Condition <- car::recode(Pe$Condition, " 'Error'='Error_Pe';'Correct'='Correct_Pe'")
+
+
+dfm.ag <- dplyr::bind_rows(ERN, Pe) # This includes the late condition
+```
+
+### ECHO Reliability 
+#### Across all
+```{r}
+# Using parallel computing
+dfm.ag$Condition <- as.factor(dfm.ag$Condition) # This variable needs to be a factor
+
+# Trying this answer: https://stackoverflow.com/questions/19791609/saving-multiple-outputs-of-foreach-dopar-loop
+comb <- function(x, ...) {
+  lapply(seq_along(x),
+    function(i) c(x[[i]], lapply(list(...), function(y) y[[i]])))
+}
+
+system.time({
+rel_result <- foreach(s = seq(4, 40, 4), .combine='comb', .options.nws=opts, .multicombine=TRUE,  .errorhandling="pass",
+                .init=list(list(), list())) %:%
+  foreach(i = 1:1000, .combine='comb', .multicombine=TRUE,  .errorhandling="pass",
+                .init=list(list(), list())) %dopar% { # Indicating how many subsamples
+    seed = sample(1:10000000, 1)
+    set.seed(seed)   ## set the seed to make your partition reproducible
+    
+    list.of.packages <- c("psych", "zoo", "reshape2", "car","taRifx", "ggplot2", "tidyr","dplyr","foreach", "doParallel","effsize")       
+    lapply(list.of.packages, require, character.only = TRUE)  
+    
+    # Before subsampling, I need to delete participants that do not have enough trials
+    n_trials <- dfm.ag %>%
+      group_by(Condition, id) %>%
+      tally() 
+    
+    ids.out <- n_trials[n_trials$n < s,] %>% dplyr::select(Condition, id) %>% unite(Condition_id, Condition, id)
+
+    # # This is similar to the loop above however, I need to create a subsampled dataset first
+    df_temp_s <- dfm.ag %>%
+      unite(Condition_id, Condition, id, remove = F) %>%
+      dplyr::filter(!Condition_id %in% ids.out$Condition_id) %>% 
+      group_by(Condition, id) %>% 
+      sample_n(s)
+    
+    # Now I can do the split half on the subsampled dataset
+    df_temp <- df_temp_s %>% 
+      sample_frac(.50) %>%      # Creating a random half
+      mutate(bin = 1) %>%       # Indicating that this is the first half 
+      dplyr::select(id, trial,Condition, bin) %>%  # Keeping only vars of interest
+      right_join(df_temp_s, by = c("id", "trial", "Condition")) %>%  # Bringing in the other half of the trials
+      mutate(bin = if_else(is.na(bin), 2, 1)) %>%  # Creating the index for the second half of the trials
+      group_by(Condition, id, bin) %>%    # Grouping by vars of interest
+      dplyr::summarise(Mean_amp = mean(value, na.rm = T)) %>% # Getting the mean amplitude by vars of interest
+      unite(Condition_bin, Condition, bin)  %>% # Creating the variable name
+      spread(Condition_bin, Mean_amp) # Going to wide using our new variable
+    
+    
+    # Checking the reliability
+    r_temp <- corr.test(df_temp[,-c(1)])$r
+    n_temp <- corr.test(df_temp[,-c(1)])$n
+    r_temp <- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+    
+    r_temp_df <- data.frame()
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = sort(levels(dfm.ag$Condition))[j/2], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$seed = seed # Setting the seed 
+      r_temp_df_j$n_trials = s # Setting the number that was subsampled by
+      
+      r_temp_df <- bind_rows(r_temp_df, r_temp_df_j)
+    
+    }
+    
+    ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+    # Saving the t-value to determine the power to detect significant Condition effect
+    # Now using the subsampled dataset to get it ready for the t-test
+    df_t <- data.frame()
+    df_t_temp <- df_temp_s %>%
+      group_by(Condition, id) %>%
+      dplyr::summarise(Mean_amp = mean(value, na.rm = T)) %>% # Next I just have to spread the data and run the t-test
+      spread(Condition, Mean_amp) # Going to wide using our new variable
+
+    t_result_ERN <- t.test(df_t_temp$Correct_ERN, df_t_temp$Error_ERN, paired = T)
+    t_result_Pe <- t.test(df_t_temp$Error_Pe, df_t_temp$Correct_Pe, paired = T)
+
+    t_temp <- data.frame(t_val_ERN = t_result_ERN$statistic, df_ERN = t_result_ERN$parameter, Mean_dif_ERN = t_result_ERN$estimate,
+                         t_val_Pe = t_result_Pe$statistic, df_Pe = t_result_Pe$parameter, Mean_dif_Pe = t_result_Pe$estimate,
+                         seed = seed, n_trials = s)
+
+    df_t <- bind_rows(df_t, t_temp)
+
+    return(list(r_temp_df, df_t))
+
+}
+})
+df_r <- do.call(dplyr::bind_rows, rel_result[[1]])
+df_t <- do.call(dplyr::bind_rows, rel_result[[2]])
+
+```
+##### Plots
+```{r}
+cutoff <- 6 # Indicating how many participants should be there to believe the correlation
+# Making sure that they at least have 6 people before looking at their correlation
+df_r$rcoeff[df_r$n < cutoff] <- NA
+
+dfm_r <- df_r # no need for melting anymore
+
+# Plotting
+ggplot(dfm_r, aes(n_trials, rcoeff, color = variable, fill = variable, group = variable)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = variable)) + my_opts+ labs(x = "# of Trials", y = "Split-Half Reliability")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 80), breaks = seq(0, 80, by = 5)) + theme(legend.position="bottom", legend.title = element_blank())
+
+# Plots with confidence intervals
+dfm_r_ag <- dfm_r %>% 
+  group_by(n_trials, variable) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(rcoeff, na.rm = T), Median = median(rcoeff), ci_L = quantile(rcoeff, .025, na.rm = T), ci_U = quantile(rcoeff, .975, na.rm = T))
+
+# dfm_r_ag$ci_L[dfm_r_ag$variable != "Updated"] <- NA
+# dfm_r_ag$ci_U[dfm_r_ag$variable != "Updated"] <- NA
+
+pd <- position_dodge(0.7) 
+ggplot(dfm_r_ag, aes(x=n_trials, y=Mean, color = variable, fill = variable, group = variable)) + 
+    geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(ylim = c(0,1), xlim = c(0,80)) + my_opts +  geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4)  # + ggtitle("Infants")
+
+ggplot(dfm_r_ag, aes(x=n_trials, y=Mean, color = variable, fill = variable, group = variable)) + geom_line(position=pd) + geom_point(position=pd) + my_opts + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_area(alpha = .1, position = "identity")
+
+```
+
+
+#### Between age
+```{r}
+dfm.ag <- dfm.ag %>% unite(Condition, Condition, age, remove = T)  # To look across age, I need to add age here to the condition
+dfm.ag$Condition <- as.factor(dfm.ag$Condition) # This variable needs to be a factor
+
+system.time({
+rel_result_age <- foreach(s = seq(4, 32, 4), .combine='comb', .options.nws=opts, .multicombine=TRUE,  .errorhandling="pass",
+                .init=list(list(), list())) %:%           # If adding a third list, remember to add a list here e.g., .init=list(list(), list(), list()))
+  foreach(i = 1:3000, .combine='comb', .multicombine=TRUE,  .errorhandling="pass",
+                .init=list(list(), list())) %dopar% { # Indicating how many subsamples  # If adding a third list, remember to add a list here e.g., .init=list(list(), list(), list()))
+    seed = sample(1:10000000, 1)
+    set.seed(seed)   ## set the seed to make your partition reproducible
+    
+    list.of.packages <- c("psych", "zoo", "reshape2", "car","taRifx", "ggplot2", "tidyr","dplyr","foreach", "doParallel","effsize")       
+    lapply(list.of.packages, require, character.only = TRUE)  
+    
+    # Before subsampling, I need to delete participants that do not have enough trials
+    n_trials <- dfm.ag %>%
+      group_by(Condition, id) %>%
+      tally() 
+    
+    ids.out <- n_trials[n_trials$n < s,] %>% dplyr::select(Condition, id) %>% unite(Condition_id, Condition, id)
+
+    # # This is similar to the loop above however, I need to create a subsampled dataset first
+    df_temp_s <- dfm.ag %>%
+      unite(Condition_id, Condition, id, remove = F) %>%
+      dplyr::filter(!Condition_id %in% ids.out$Condition_id) %>% 
+      group_by(Condition, id) %>% 
+      sample_n(s)
+    
+    # Now I can do the split half on the subsampled dataset
+    df_temp <- df_temp_s %>% 
+      sample_frac(.50) %>%      # Creating a random half
+      mutate(bin = 1) %>%       # Indicating that this is the first half 
+      dplyr::select(id, trial,Condition, bin) %>%  # Keeping only vars of interest
+      right_join(df_temp_s, by = c("id", "trial", "Condition")) %>%  # Bringing in the other half of the trials
+      mutate(bin = if_else(is.na(bin), 2, 1)) %>%  # Creating the index for the second half of the trials
+      group_by(Condition, id, bin) %>%    # Grouping by vars of interest
+      dplyr::summarise(Mean_amp = mean(value, na.rm = T)) %>% # Getting the mean amplitude by vars of interest
+      unite(Condition_bin, Condition, bin)  %>% # Creating the variable name
+      spread(Condition_bin, Mean_amp) # Going to wide using our new variable
+    
+    
+    # Checking the reliability
+    r_temp <- corr.test(df_temp[,-c(1)])$r
+    n_temp <- corr.test(df_temp[,-c(1)])$n
+    r_temp <- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+    
+    r_temp_df <- data.frame()
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = sort(levels(dfm.ag$Condition))[j/2], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$seed = seed # Setting the seed 
+      r_temp_df_j$n_trials = s # Setting the number that was subsampled by
+      
+      r_temp_df <- bind_rows(r_temp_df, r_temp_df_j)
+    
+    }
+    
+    
+    ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+    # Saving the t-value to determine the power to detect significant Condition effect
+    # Now using the subsampled dataset to get it ready for the t-test
+    df_t <- data.frame()
+    df_t_temp <- df_temp_s %>%
+      group_by(Condition, id) %>%
+      dplyr::summarise(Mean_amp = mean(value, na.rm = T)) # %>% # Next I just have to spread the data and run the t-test
+      # spread(Condition, Mean_amp) # Going to wide using our new variable
+    t_temp <- data.frame()
+    for (age_i in c("4Y","5Y","7Y","9Y")) {
+      df_t_temp_age <- df_t_temp[grepl(age_i, df_t_temp$Condition),]
+      df_t_temp_age$Condition <- gsub(paste0("_",age_i), "", df_t_temp_age$Condition)
+      # df_SME_temp_age <- df_t_temp_age # Saving this for SME computation
+            
+      df_t_temp_age <- spread(df_t_temp_age, Condition, Mean_amp)
+      t_result_ERN <- t.test(df_t_temp_age$Correct_ERN, df_t_temp_age$Error_ERN, paired = T)
+      eff_result_ERN <- cohen.d(df_t_temp_age$Correct_ERN, df_t_temp_age$Error_ERN, paired = T, na.rm=T)
+      t_result_Pe <- t.test(df_t_temp_age$Error_Pe, df_t_temp_age$Correct_Pe, paired = T)
+      eff_result_Pe <- cohen.d(df_t_temp_age$Error_Pe, df_t_temp_age$Correct_Pe, paired = T, na.rm=T)
+      
+      t_temp_age <- data.frame(t_val_ERN = t_result_ERN$statistic, df_ERN = t_result_ERN$parameter, Mean_dif_ERN = t_result_ERN$estimate,
+                               Cohend_ERN = eff_result_ERN$estimate, Cohend.LL_ERN = eff_result_ERN$conf.int[1], Cohend.UL_ERN = eff_result_ERN$conf.int[2],
+                         t_val_Pe = t_result_Pe$statistic, df_Pe = t_result_Pe$parameter, Mean_dif_Pe = t_result_Pe$estimate,
+                               Cohend_Pe = eff_result_Pe$estimate, Cohend.LL_Pe = eff_result_Pe$conf.int[1], Cohend.UL_Pe = eff_result_Pe$conf.int[2],
+                         seed = seed, n_trials = s, Age = age_i)
+      
+      t_temp <- bind_rows(t_temp, t_temp_age)
+    }
+    
+    df_t <- bind_rows(df_t, t_temp)
+    
+    # ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+    # # Computing the SME based on Luck et al 2020 (preprint)
+    # # Now using the subsampled dataset to get it ready for the SME computation for each participant
+    # df_SME_temp <- df_temp_s %>%
+    #   group_by(Condition, id) %>%
+    #   dplyr::summarise(SME = (sd(value, na.rm = T)/sqrt(length(value)) ),
+    #                    seed = seed, n_trials = s)  # %>% # Next I just have to spread the data and run the t-test
+    
+    # Returning everything out of the parallel loop
+    # return(list(r_temp_df, df_t, df_SME_temp)) #If adding a third list, remember to add a list on loops above e.g., .init=list(list(), list(), list()))
+    return(list(r_temp_df, df_t))
+}
+})
+df_r <- do.call(dplyr::bind_rows, rel_result_age[[1]])
+df_t <- do.call(dplyr::bind_rows, rel_result_age[[2]])
+# df_SME <- do.call(dplyr::bind_rows, rel_result_age[3]) # Maybe this is not very efficient and maybe not useful
+
+```
+
+##### Plots
+```{r}
+cutoff <- 6 # Indicating how many participants should be there to believe the correlation
+
+df_r$Age <- as.numeric(gsub("[^\\d]+", "", df_r$variable, perl=TRUE))# Separating age and condition
+df_r$variable <- sub("_[^_]+$", "", df_r$variable)
+# Making sure that they at least have 6 people before looking at their correlation
+df_r$rcoeff[df_r$n < cutoff] <- NA
+df_r$rcoeff[df_r$rcoeff < 0] <- 0
+
+
+dfm_r <- df_r # no need for melting anymore
+
+# Plotting
+ggplot(dfm_r, aes(n_trials, rcoeff, color = variable, fill = variable, group = variable)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = variable)) + my_opts+ labs(x = "# of Trials", y = "Split-Half Reliability")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 80), breaks = seq(0, 80, by = 5)) + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~Age)
+
+ggplot(dfm_r, aes(n_trials, rcoeff, color = as.factor(Age), fill = as.factor(Age), group = as.factor(Age))) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "# of Trials", y = "Split-Half Reliability")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~variable)
+
+
+# Plots with confidence intervals
+dfm_r_ag <- dfm_r %>% 
+  group_by(n_trials, variable, Age) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(rcoeff, na.rm = T), Median = median(rcoeff), ci_L = quantile(rcoeff, .025, na.rm = T), ci_U = quantile(rcoeff, .975, na.rm = T))
+
+pd <- position_dodge(1) 
+ggplot(dfm_r_ag, aes(x=n_trials, y=Mean, color = variable, fill = variable, group = variable)) + 
+    geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(ylim = c(0,1), xlim = c(0,80)) + my_opts +  geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4)  + facet_wrap(~Age)
+
+ggplot(dfm_r_ag, aes(x=n_trials, y=Mean, color = as.factor(Age), fill = as.factor(Age), group = as.factor(Age))) + 
+    geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.3, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(ylim = c(0,1), xlim = c(0,80)) + my_opts +  geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4)  + facet_wrap(~variable)
+
+dfm_r_ag$Mean_fix <- ifelse(dfm_r_ag$Mean <0, 0, dfm_r_ag$Mean)
+dfm_r_ag$ci_L_fix <- ifelse(dfm_r_ag$ci_L <0, 0, dfm_r_ag$ci_L)
+dfm_r_ag$ci_U_fix <- ifelse(dfm_r_ag$ci_U <0, 0, dfm_r_ag$ci_U)
+dfm_r_ag$variable_fix <- recode_factor(dfm_r_ag$variable, !!!list('Correct_ERN'='Correct (CRN)', 'Correct_Pe'='Correct (Pe)', 
+                                                                  'Error_ERN'='Error (ERN)', 'Error_Pe'='Error (Pe)')) # Recoding for plot
+
+dfm_r_ag$Age <- as.factor(dfm_r_ag$Age)
+
+(p.erp.rel <- ggplot(dfm_r_ag, aes(x=n_trials, y=Mean_fix, color = Age, fill = Age, group = Age)) + 
+    geom_errorbar(aes(ymin=ci_L_fix, ymax=ci_U_fix), width=.3, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(ylim = c(0,1), xlim = c(0,32)) + my_opts +  geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) + labs(x = "Number of Trials", y = "Split-Half Reliability of ERPs") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~variable_fix) )
+
+# Getting the number of trials needed for a given cutoff
+dfm_r_ag_cutoff_mean <- dfm_r_ag %>% 
+  group_by(variable, Age) %>% # Grouping by vars of interest
+  filter(Mean >= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_mean %>% select(n_trials, variable_fix, Age) %>% spread(variable_fix, n_trials) 
+
+dfm_r_ag_cutoff_ci <- dfm_r_ag %>% 
+  group_by(variable, Age) %>% # Grouping by vars of interest
+  filter(ci_U >= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_ci %>% select(n_trials, variable_fix, Age) %>% spread(variable_fix, n_trials) 
+
+#####
+# Plotting the effect sizes
+df_t$Cohend_ERN[df_t$df_ERN < (cutoff-2)] <- NA # It is dfs so I need to subtract two 
+df_t$Cohend_Pe[df_t$df_Pe < (cutoff-2)] <- NA # It is dfs so I need to subtract two 
+
+dfm_Cohend <- melt(df_t[,c("Cohend_ERN", "Cohend_Pe", "n_trials", "Age")], id=c("n_trials", "Age"))
+dfm_Cohend$variable <- recode_factor(dfm_Cohend$variable, !!!list('Cohend_ERN'='ERN', 'Cohend_Pe'='Pe')) # Recoding for plot
+
+# Plotting
+ggplot(dfm_Cohend, aes(n_trials, abs(value), color = variable, fill = variable, group = variable)) + stat_summary(fun.y = mean, geom = "point") + stat_summary(fun.y = mean, geom = "line",  aes(group = variable)) + my_opts+ labs(x = "Number of Trials", y = "Effect Size (Cohen's d)") + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~Age)
+
+dfm_Cohend$Age <- as.factor(dfm_Cohend$Age)
+ggplot(dfm_Cohend, aes(n_trials, abs(value), color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point") + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Effect Size (Cohen's d)") + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~variable) + ylim(0, 1.7)
+
+# Plots with confidence intervals
+dfm_Cohend_ag <- dfm_Cohend %>% 
+  group_by(n_trials, variable, Age) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(value, na.rm = T), Median = median(value), ci_L = quantile(value, .025, na.rm = T), ci_U = quantile(value, .975, na.rm = T))
+
+dfm_Cohend_ag$Age <- as.factor(dfm_Cohend_ag$Age)
+
+ggplot(dfm_Cohend_ag, aes(x=n_trials, y=Mean, color = Age, fill = Age, group = Age)) + 
+    geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(xlim = c(0,32)) + my_opts + labs(x = "Number of Trials", y = "Effect Size (Cohen's d)") + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~variable)
+
+dfm_Cohend_ag$Age <- as.numeric(gsub("Y", "", dfm_Cohend_ag$Age))
+dfm_Cohend_ag$Age <- as.factor(dfm_Cohend_ag$Age)
+
+# Plotting
+(p.erp.es <- ggplot(dfm_Cohend_ag, aes(n_trials, Mean, color = Age, fill = Age, group = Age)) + geom_line(position=pd) + geom_point(position=pd) +  geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_line(position=pd) + my_opts+ labs(x = "Number of Trials", y = "Effect Size of ERP (Cohen d)") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~variable) +
+     geom_hline(yintercept=.8, color='black', linetype = 2) + geom_hline(yintercept=.5, color='black', linetype = 1) + geom_hline(yintercept=.2, color='black', linetype = 3) +
+    geom_hline(yintercept=-.8, color='black', linetype = 2) + geom_hline(yintercept=-.5, color='black', linetype = 1) + geom_hline(yintercept=-.2, color='black', linetype = 3) )
+
+```
+
+#### ICCs
+```{r}
+# Before going wide, I need a new trial index to because I removed a bunch of standard trials
+dfm.ag <- dfm.ag %>%
+  group_by(id, Condition, age) %>%
+  mutate(trial_new = seq(1:length(value))) %>%
+  ungroup()
+
+df.ag.w <- dcast(dfm.ag, id ~ Condition + age + trial_new, value.var= c("value"))
+
+df.icc.erp <- data.frame()
+for (cond in c("Correct_ERN", "Error_ERN", "Correct_Pe", "Error_Pe")) {
+  for (age_i in c("7Y", "9Y", "5Y", "4Y")) {
+    icc_temp <- df.ag.w %>% select(starts_with(cond)) %>% select(contains(age_i)) %>% ICC(.)
+    df_temp <- as.data.frame(icc_temp$results)
+    df_temp$n_trials <- icc_temp$n.judge
+    df_temp$n_participants <- icc_temp$n.obs
+    df_temp$Condition <- cond
+    df_temp$age <- age_i
+    df_temp <- df_temp[df_temp$type=="ICC1k",] # keeping only this row
+    df.icc.erp <- bind_rows(df.icc.erp, df_temp)
+  }
+}
+
+df.icc.erp$ci_L <- df.icc.erp$`lower bound`
+df.icc.erp$ci_U <- df.icc.erp$`upper bound`
+df.icc.erp$Age <- as.numeric(gsub("Y","", df.icc.erp$age))
+df.icc.erp$Condition_fix <- recode_factor(df.icc.erp$Condition, !!!list('Deviant'='MMN', 'Deviant_late'='LDN', 'Novel'='P3', 
+                                                                  'Standard_Deviant'='MMN_Standard', 'Standard_late'='LDN_Standard', 'Standard_Novel'='P3_Standard')) # Recoding for plot
+
+ggplot(df.icc.erp, aes(x=as.factor(Age), y=ICC, color = as.factor(Age))) + geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_point(position=pd)  + my_opts + theme(legend.position="bottom", legend.title = element_blank()) + labs(y = "Overall Reliabiltiy (ICC/alpha)", x = "Age") + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) + coord_cartesian(ylim = c(0,1)) + facet_wrap(~Condition_fix)
+
+df.icc.erp %>% select(ICC, Condition, Age) %>% pivot_wider(id_cols = c(Age), names_from = c(Condition), values_from = ICC)
+```
+
+#### Overall reliability
+```{r}
+# Creating function for overall reliability
+splithalf_overall_diff_parallel <- function(data, n_subsamples) { 
+  # Eg., df_r <- splithalf_trials(dfm.ag, 2, 100, 5, 10)
+
+  registerDoParallel(4)  # use multicore, set to the number of our cores
+  opts <- list(chunkSize=2)
+  results_df <- foreach(i = 1:n_subsamples, .combine='rbind') %dopar% { # Indicating how many subsamples
+    # df_temp <- dfm.ag[dfm.ag$id == i, ]  
+    seed = sample(1:10000000, 1)
+    set.seed(seed)   ## set the seed to make your partition reproducible
+    
+    # Loading packages
+    list.of.packages <- c("psych", "zoo", "reshape2", "car","taRifx", "ggplot2", "tidyr","dplyr","foreach", "doParallel")       
+    lapply(list.of.packages, require, character.only = TRUE) 
+    
+    # Now I can do the split half on the subsampled dataset
+    df_temp <- data %>% 
+      group_by(cond, id) %>% 
+      sample_frac(.50) %>%      # Creating a random half
+      mutate(bin = 1) %>%       # Indicating that this is the first half 
+      dplyr::select(id, trial,cond, bin) %>%  # Keeping only vars of interest
+      right_join(data, by = c("id", "trial", "cond")) %>%  # Bringing in the other half of the trials
+      mutate(bin = if_else(is.na(bin), 2, 1)) %>%  # Creating the index for the second half of the trials
+      group_by(cond, id, bin) %>%    # Grouping by vars of interest
+      dplyr::summarise(Mean_amp = mean(value, na.rm = T)) %>% # Getting the mean amplitude by vars of interest
+      unite(cond_bin, cond, bin)  %>% # Creating the variable name
+      spread(cond_bin, Mean_amp) # Going to wide using our new variable
+    
+    # Checking the reliability
+    r_temp <- corr.test(df_temp[,-c(1)])$r
+    n_temp <- corr.test(df_temp[,-c(1)])$n
+    r_temp <- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+    
+    conditions_temp <- unique(gsub("(.*)_.*","\\1",row.names(r_temp))) # removing everything after the last "_" and only keeping unique conditions  
+
+    
+    r_temp_df <- data.frame()
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j/2], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$seed = seed # Setting the seed 
+
+      r_temp_df <- bind_rows(r_temp_df, r_temp_df_j)
+    
+    }
+    
+    return(r_temp_df)
+  }
+}
+
+dfm.ag <- dfm.ag %>% unite(Condition, Condition, age, remove = T)  # To look across age, I need to add age here to the condition
+dfm.ag$cond <- as.factor(dfm.ag$Condition) # This variable needs to be a factor
+
+df_erp_all <- splithalf_overall_diff_parallel(data = dfm.ag, n_subsamples = 3000)
+describeBy(df_erp_all$rcoeff, df_erp_all$variable)
+
+```
+
+#### Checking correlations
+```{r}
+df_erps_reliability_check <- dfm.ag %>% group_by(id_age, Condition, age) %>% summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+
+df_erps_reliability_check <- merge(df_erps_reliability_check, dfmerged[,c("id_age","Correct_Fz_ERN","Error_Fz_ERN","Correct_Pz_Pe","Error_Pz_Pe")], by = "id_age", all = T)
+corr.test(df_erps_reliability_check[-c(1:2)])
+```
+
+
+# Revision
+## TF Power Reliability Check
+### Setup w subsamples
+```{r}
+# Creating a list of the matlab files 
+tbt_data_path <- "Y:/Projects/ECHO/CSD_TimeFreqs/Zoo_3s/Reliability_10/R1/TF_SubSample_300_100_3k/" # This is with the original baseline with new way of TF rel
+
+
+matlab_list <- list.files(path = tbt_data_path, pattern = ".mat", ignore.case = T)
+
+
+condition <- c("correct", "error")
+# df_TF_subs_test <- data.frame()
+df_TF_subs <- list()
+counter_TF = 0
+for (i in 1:length(matlab_list)) { 
+  
+  mat_file_name <- matlab_list[i]
+  id <- paste(sapply(strsplit(as.character(mat_file_name),"_"), `[`, 1), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 2), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 3), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 4), sep = "_")
+  print(paste0("Now in ",i," ", mat_file_name))
+  matlabFile <- readMat(paste0(tbt_data_path,mat_file_name)) # Reading in matlab file
+  
+  # Data are 8 trials x 2 halves x 1000 subsamples x 150 time 
+  for (cond in condition) {
+    for (half_i in 1:2) {
+      for (f.band in c("1.4", "4.8")) {
+        cond_name <- paste0(cond, ".tf.subsamples.",f.band)
+        df_temp <- matlabFile[[cond_name]]
+      
+        for (trial_i in 1:dim(df_temp)[1]) { # This is for the trials
+          df_temp_t <- df_temp[trial_i,,] # Selecting only 10 subsamples
+          df_temp_h <- df_temp_t[half_i,]
+          df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+          
+          names(df_temp_h) <- "value"
+          df_temp_h$id <- id
+          df_temp_h$cond <- cond
+          df_temp_h$half <- half_i
+          df_temp_h$trial <- trial_i
+          df_temp_h$sub <- seq(1,nrow(df_temp_h))
+          df_temp_h$f.band <- f.band
+          # df_TF_subs_test <- bind_rows(df_TF_subs_test, df_temp_h)
+          counter_TF = counter_TF + 1
+          df_TF_subs[[counter_TF]] <- df_temp_h
+          
+        }
+      }
+    }
+  }
+}
+
+
+dfm <- do.call(dplyr::bind_rows, df_TF_subs)
+
+# dfm <- df_TF_subs
+# No need for melting anymore
+dfm$value <- as.numeric(dfm$value) # Check for warnings
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+dfm_TF_reliability <- dfm
+```
+
+### Creating plots
+```{r}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + f.band, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag[ dfm.ag$f.band=="1.4",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=100, xmax=400, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("Fz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = "TF") 
+ggplot(dfm.ag[dfm.ag$f.band=="4.8",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=100, xmax=400, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+  geom_line(aes(colour=Condition), size=1) + ggtitle("Fz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = "TF") 
+
+# Checking differences across subsamples 
+dfm.ag <- aggregate(cbind(value) ~ Condition + time + f.band + sub, dfm[dfm$trial==1,], function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+ggplot(dfm.ag[dfm.ag$f.band=="4.8",], aes(x =time,y=value)) + xlab("Time") +  geom_rect(aes(xmin=100, xmax=400, ymin=-Inf, ymax=Inf), fill='gray85', alpha=0.01) + 
+geom_line(aes(colour=Condition), size=1) + ggtitle("Fz") + my_opts + theme(legend.position="bottom") + labs(x = "Time", y = "ITPS") + facet_wrap(~sub)
+
+
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition +  f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag, aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "TF") + my_opts
+
+
+```
+
+### Reliability
+```{r}
+# Extracting time of interest
+# Delta
+Delta_TF <- dfm[dfm$f.band=="1.4",]
+# Delta_TF <- aggregate(cbind(value) ~ id_age + Condition + half + trial + sub, Delta_TF, function(x) mean(x, na.rm=T))
+Delta_TF$age <- sapply(strsplit(Delta_TF$id_age,"_"), `[`, 4) 
+Delta_TF$Condition <- car::recode(Delta_TF$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_TF <- dcast(Delta_TF, id_age + trial + sub ~ Condition  + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_TF <- dfm[dfm$f.band=="4.8",]
+# Theta_TF <- aggregate(cbind(value) ~ id_age + Condition  + half + trial + sub, Theta_TF, function(x) mean(x, na.rm=T))
+Theta_TF$age <- sapply(strsplit(Theta_TF$id_age,"_"), `[`, 4) 
+Theta_TF$Condition <- car::recode(Theta_TF$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_TF <- dcast(Theta_TF, id_age + trial + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+df_TF_reliability <- merge(Delta_TF, Theta_TF, by = c("id_age", "trial", "sub"), all = T)
+
+
+library(tidyverse)
+df_TF_reliability_cor <- df_TF_reliability %>%
+  select(-id_age) %>%
+  unite(trial_sub, trial,sub) %>% 
+  split(.$trial_sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_TF <- list()
+counter_TF = 0
+for (i in 1:length(df_TF_reliability_cor)) {
+  r_temp <- df_TF_reliability_cor[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_TF_reliability_cor[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_TF_reliability_cor)[i] # Setting the subsamples
+      r_temp_df_j$n_trials = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][1])*4
+      r_temp_df_j$sub = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][2])
+        
+      counter_TF = counter_TF + 1
+      print(counter_TF)
+      rel_result_TF[[counter_TF]] <- r_temp_df_j
+    }
+  
+}
+rel_result_TF <- do.call(dplyr::bind_rows, rel_result_TF)
+
+# Summarizing with confidence intervals
+rel_result_TF <- rel_result_TF %>% 
+  group_by(variable, n, n_trials) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(rcoeff, na.rm = T), Median = median(rcoeff), ci_L = quantile(rcoeff, .025, na.rm = T), ci_U = quantile(rcoeff, .975, na.rm = T))
+
+rel_result_TF$Mean_fix <- ifelse(rel_result_TF$Mean <0, 0, rel_result_TF$Mean)
+rel_result_TF$ci_L_fix <- ifelse(rel_result_TF$ci_L <0, 0, rel_result_TF$ci_L)
+rel_result_TF$ci_U_fix <- ifelse(rel_result_TF$ci_U <0, 0, rel_result_TF$ci_U)
+rel_result_TF$variable_fix <- recode_factor(rel_result_TF$variable, !!!list('Correct_Delta'='Correct (Delta)', 'Correct_Theta'='Correct (Theta)', 
+                                                                  'Error_Delta'='Error (Delta)', 'Error_Theta'='Error (Theta)')) # Recoding for plot
+
+rel_result_TF$Mean_fix[rel_result_TF$n < 6] <- NA
+rel_result_TF$ci_L_fix[rel_result_TF$n < 6] <- NA
+rel_result_TF$ci_U_fix[rel_result_TF$n < 6] <- NA
+rel_result_TF$Age <- sapply(strsplit(as.character(rel_result_TF$variable),"_"), `[`, 3) 
+rel_result_TF$Age <- as.numeric(gsub("Y", "", rel_result_TF$Age))
+rel_result_TF$Condition <- paste0(sapply(strsplit(as.character(rel_result_TF$variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(rel_result_TF$variable),"_"), `[`, 2))
+
+rel_result_TF$Condition_fix <- recode_factor(rel_result_TF$Condition, !!!list('Correct_Delta'='Correct (Delta)', 'Correct_Theta'='Correct (Theta)', 
+                                                                  'Error_Delta'='Error (Delta)', 'Error_Theta'='Error (Theta)')) # Recoding for plot
+rel_result_TF$Age <- as.factor(rel_result_TF$Age)
+
+(p.power.rel <- ggplot(rel_result_TF, aes(x=n_trials, y=Mean_fix, color = Age, fill = Age, group = Age)) + 
+    geom_errorbar(aes(ymin=ci_L_fix, ymax=ci_U_fix), width=.3, position=pd) + geom_line(position=pd) + geom_point(position=pd) + coord_cartesian(ylim = c(0,1), xlim = c(0,32)) + my_opts +  geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4)  + facet_wrap(~Condition_fix) + labs(x = "Number of Trials", y = "Split-Half Reliability of Power")  + theme(legend.position="none") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) )
+
+# Getting the number of trials needed for a given cutoff
+dfm_r_ag_cutoff_mean <- rel_result_TF %>% 
+  group_by(Condition, Age) %>% # Grouping by vars of interest
+  filter(Mean_fix>= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_mean %>% select(n_trials, Condition, Age) %>% spread(Condition, n_trials) 
+
+
+dfm_r_ag_cutoff_ci <- rel_result_TF %>% 
+  group_by(Condition, Age) %>% # Grouping by vars of interest
+  filter(ci_U >= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_ci %>% select(n_trials, Condition, Age) %>% spread(Condition, n_trials) 
+
+#####   #####   #####   #####   #####   #####   #####   #####
+# Power estimates
+df_TF_cohend <- df_TF_reliability %>%
+  melt(., id.vars = c("id_age", "trial","sub")) %>%
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(variable),"_"), `[`, 3)) %>%
+  group_by(id_age, trial, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, trial, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na() %>%
+  filter(trial<9) %>% # Doing this because we run of trials at 36 error trials for age 4 (min 6 participants)
+  group_by(trial, Age) %>%
+  summarise(n = t.test(Error_Delta, Correct_Delta, paired = T, na.rm=T)$parameter,
+    Error_Delta = cohen.d(Error_Delta, Correct_Delta, paired = T, na.rm=T)$estimate,
+            Error_Theta = cohen.d(Error_Theta, Correct_Theta, paired = T, na.rm=T)$estimate)
+
+df_TF_cohend <- list()
+counter_TF = 0 
+for (trial_i in 1:max(df_TF_reliability$trial)) {
+  for (sub_i in 1:max(df_TF_reliability$sub)) {
+    df_TF_reliability_temp <- df_TF_reliability[df_TF_reliability$trial==trial_i & df_TF_reliability$sub==sub_i,]
+    df_TF_cohend_temp <- melt(df_TF_reliability_temp, id.vars = c("id_age", "trial","sub"))
+    df_TF_cohend_temp$Condition <- paste0(sapply(strsplit(as.character(df_TF_cohend_temp$variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(df_TF_cohend_temp$variable),"_"), `[`, 2))
+    df_TF_cohend_temp$Age <- sapply(strsplit(as.character(df_TF_cohend_temp$variable),"_"), `[`, 3)
+    df_TF_cohend_temp <- df_TF_cohend_temp %>% group_by(id_age, trial, Condition, Age) %>%
+    summarise(value = mean(value, na.rm = T)) %>%
+    pivot_wider(id_cols = c(id_age, trial, Age), names_from = c(Condition), values_from = value) %>%
+    drop_na() %>%
+    group_by(trial,Age) %>%
+    summarise(n = t.test(Error_Delta, Correct_Delta, paired = T, na.rm=T)$parameter,
+      Error_Delta = cohen.d(Error_Delta, Correct_Delta, paired = T, na.rm=T)$estimate,
+              Error_Theta = cohen.d(Error_Theta, Correct_Theta, paired = T, na.rm=T)$estimate)
+    # df_TF_cohend_temp$trial <- trial_i
+    df_TF_cohend_temp$sub <- sub_i
+    counter_TF = counter_TF + 1
+    print(counter_TF)
+    df_TF_cohend[[counter_TF]] <- df_TF_cohend_temp
+  } 
+}
+
+df_TF_cohend <- do.call(dplyr::bind_rows, df_TF_cohend)
+df_TF_cohend$trial <- df_TF_cohend$trial*4
+dfm_TF_cohend <- melt(df_TF_cohend, id.vars = c("trial","Age", "n","sub"))
+
+# Summarizing with confidence intervals
+df_TF_cohend.ag <- dfm_TF_cohend %>% 
+  group_by(variable, Age, n,trial) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(value, na.rm = T), Median = median(value), ci_L = quantile(value, .025, na.rm = T), ci_U = quantile(value, .975, na.rm = T))
+
+
+
+df_TF_cohend.ag$Age <- as.numeric(gsub("Y", "", df_TF_cohend.ag$Age))
+df_TF_cohend.ag$variable_fix <- recode_factor(df_TF_cohend.ag$variable, !!!list('Error_Delta'='Delta', 'Error_Theta'='Theta')) # Recoding for plot
+df_TF_cohend.ag$Age <- as.factor(df_TF_cohend.ag$Age)
+df_TF_cohend.ag$Mean[df_TF_cohend.ag$n < 5] <- NA
+df_TF_cohend.ag$ci_L[df_TF_cohend.ag$n < 5] <- NA
+df_TF_cohend.ag$ci_U[df_TF_cohend.ag$n < 5] <- NA
+
+
+(p.power.es <- ggplot(df_TF_cohend.ag, aes(x=trial, y=Mean, color = Age, fill = Age, group = Age)) + geom_line(position=pd) + geom_point(position=pd) +  geom_errorbar(aes(ymin=ci_L, ymax=ci_U), width=.2, position=pd) + geom_line(position=pd) + my_opts+ labs(x = "Number of Trials", y = "Effect Size of Power (Cohen d)") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~variable_fix) +
+     geom_hline(yintercept=.8, color='black', linetype = 2) + geom_hline(yintercept=.5, color='black', linetype = 1) + geom_hline(yintercept=.2, color='black', linetype = 3) +
+    geom_hline(yintercept=-.8, color='black', linetype = 2) + geom_hline(yintercept=-.5, color='black', linetype = 1) + geom_hline(yintercept=-.2, color='black', linetype = 3) )
+
+```
+
+### Checking correlations w other scores
+```{r}
+df_TF_reliability_check <- df_TF_reliability[df_TF_reliability$trial==1,]  # Selecting only one
+df_TF_reliability_check <- melt(df_TF_reliability[df_TF_reliability$trial==1,], id.vars = c("id_age", "trial","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(variable),"_"), `[`, 3)) %>%
+   group_by(id_age, trial, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, trial, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_TF_reliability_check <- merge(df_TF_reliability_check, dfmerged[,c("id_age","Correct_Delta","Correct_Theta","Error_Delta","Error_Theta")], by = "id_age", all = T)
+
+corr.test(df_TF_reliability_check[-c(1:3)])
+```
+
+### Overall TF reliability
+#### setup
+```{r}
+tbt_data_path <- "Y:/Projects/ECHO/CSD_TimeFreqs/Zoo_3s/Reliability_10/R1/TF_All_300_100_3k/" # This is with the original baseline with new way of TF rel
+
+
+matlab_list <- list.files(path = tbt_data_path, pattern = ".mat", ignore.case = T)
+condition <- c("correct", "error")
+# df_TF_subs_test <- data.frame()
+df_TF_All <- list()
+counter_TF = 0
+for (i in 1:length(matlab_list)) { 
+  
+  mat_file_name <- matlab_list[i]
+  id <- paste(sapply(strsplit(as.character(mat_file_name),"_"), `[`, 1), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 2), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 3), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 4), sep = "_")
+  print(paste0("Now in ",i," ", mat_file_name))
+  matlabFile <- readMat(paste0(tbt_data_path,mat_file_name)) # Reading in matlab file
+  
+  for (cond in condition) {
+    for (half_i in 1:2) {
+      for (f.band in c("1.4", "4.8")) {
+        cond_name <- paste0(cond, ".tf.subsamples.",f.band)
+        df_temp <- matlabFile[[cond_name]]
+        
+        df_temp_h <- df_temp[half_i,]
+        df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+        names(df_temp_h) <- "value"
+        df_temp_h$id <- id
+        df_temp_h$cond <- cond
+        df_temp_h$half <- half_i
+        df_temp_h$sub <- seq(1,nrow(df_temp_h))
+        df_temp_h$f.band <- f.band
+        # df_TF_subs_test <- bind_rows(df_TF_subs_test, df_temp_h)
+        counter_TF = counter_TF + 1
+        df_TF_All[[counter_TF]] <- df_temp_h
+        
+      }
+    }
+  }
+}
+
+
+dfm <- do.call(dplyr::bind_rows, df_TF_All)
+
+# dfm <- df_TF_subs
+# No need for melting anymore
+dfm$value <- as.numeric(dfm$value) # Check for warnings
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+dfm_TF_reliability_All <- dfm
+# dfm <- dfm_TF_reliability_All
+```
+
+#### Creating plots
+```{r}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition +  f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag, aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "TF") + my_opts
+```
+
+#### Reliability
+```{r}
+
+# Extracting time of interest
+# Delta
+Delta_TF <- dfm[dfm$f.band=="1.4",]
+# Delta_TF <- aggregate(cbind(value) ~ id_age + Condition + half + trial + sub, Delta_TF, function(x) mean(x, na.rm=T))
+Delta_TF$age <- sapply(strsplit(Delta_TF$id_age,"_"), `[`, 4) 
+Delta_TF$Condition <- car::recode(Delta_TF$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_TF <- dcast(Delta_TF, id_age + sub ~ Condition  + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_TF <- dfm[dfm$f.band=="4.8",]
+# Theta_TF <- aggregate(cbind(value) ~ id_age + Condition  + half + trial + sub, Theta_TF, function(x) mean(x, na.rm=T))
+Theta_TF$age <- sapply(strsplit(Theta_TF$id_age,"_"), `[`, 4) 
+Theta_TF$Condition <- car::recode(Theta_TF$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_TF <- dcast(Theta_TF, id_age + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+df_TF_reliability_All <- merge(Delta_TF, Theta_TF, by = c("id_age", "sub"), all = T)
+
+
+library(tidyverse)
+df_TF_reliability_cor_all <- df_TF_reliability_All %>%
+  select(-id_age) %>%
+  split(.$sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_TF_all <- data.frame()
+for (i in 1:length(df_TF_reliability_cor_all)) {
+  r_temp <- df_TF_reliability_cor_all[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_TF_reliability_cor_all[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_TF_reliability_cor_all)[i] # Setting the subsamples
+      rel_result_TF_all <- bind_rows(rel_result_TF_all, r_temp_df_j)
+    }
+  
+}
+
+
+# Summarizing with confidence intervals
+rel_result_TF_all <- rel_result_TF_all %>% 
+  group_by(variable, n) %>% # Grouping by vars of interest
+  dplyr::summarise(Mean = mean(rcoeff, na.rm = T), Median = median(rcoeff), ci_L = quantile(rcoeff, .025, na.rm = T), ci_U = quantile(rcoeff, .975, na.rm = T))
+
+
+```
+
+#### Checking correlations w other scores
+```{r}
+df_TF_reliability_check <- melt(df_TF_reliability_All, id.vars = c("id_age","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(variable),"_"), `[`, 3)) %>%
+   group_by(id_age, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_TF_reliability_check <- merge(df_TF_reliability_check, dfmerged[,c("id_age","Correct_Delta","Correct_Theta","Error_Delta","Error_Theta")], by = "id_age", all = T)
+
+corr.test(df_TF_reliability_check[-c(1:2)])
+```
+
+## ITPS & ICPS
+### Setup
+```{r}
+# Creating a list of the matlab files 
+tbt_data_path <- "X:/Dropboxes/moraless/ECHO/Reliability/R1_subs_300_100/" # This is the original baseline
+
+
+matlab_list <- list.files(path = tbt_data_path, pattern = ".mat", ignore.case = T)
+matlab_list <- matlab_list[grepl("ICPS_Reliability.mat", matlab_list)]
+
+# NOTE: because I downsampled the channels, now these are the new indices
+Fz <- c(1, 2, 5)
+rFl <- c(6, 7) # just limiting to two elecs Frontal
+lFl <- c(3, 4) # just limiting to two elecs Frontal
+
+condition <- c("correct", "error")
+# df_ITPS <- data.frame()
+# df_ICPS <- data.frame()
+df_ITPS <- list()
+df_ICPS <- list()
+counter_ITPS = 0
+counter_ICPS = 0
+for (i in 1:length(matlab_list)) {
+  
+  mat_file_name <- matlab_list[i]
+  id <- paste(sapply(strsplit(as.character(mat_file_name),"_"), `[`, 1), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 2), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 3), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 4), sep = "_")
+  print(paste0("Now in ",i," ", mat_file_name))
+  matlabFile <- readMat(paste0(tbt_data_path,mat_file_name)) # Reading in matlab file
+  
+  for (cond in condition) {
+    for (half_i in 1:2) {
+      for (f.band in c("1.4", "4.8")) {
+        
+        # ITPS
+        for (cluster in c("Fz")) {
+          if (cluster=="Fz") {
+            clust <- Fz
+          } else if (cluster=="Tz") {
+            clust <- Tz
+          }
+          cond_name <- paste0(cond, ".ITPS.data.",f.band)
+          df_temp <- matlabFile[[cond_name]]
+          
+          for (trial_i in 1:dim(df_temp)[2]) { # This is for all the trials
+            df_temp_t <- df_temp[,trial_i,,]
+            df_temp_c <- df_temp_t[clust,,]
+            df_temp_c <- apply(df_temp_c, c(2,3), function(x) mean(x, na.rm = T)) # For each combination in the 2nd, 3rd dimensions, average over the values in the 1st - avging across electrodes
+            df_temp_h <- df_temp_c[half_i,]
+            df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+            
+            names(df_temp_h) <- "value"
+            df_temp_h$id <- id
+            df_temp_h$cond <- cond
+            df_temp_h$half <- half_i
+            df_temp_h$trial <- trial_i
+            df_temp_h$sub <- seq(1,nrow(df_temp_h))
+            df_temp_h$chan <- cluster
+            df_temp_h$f.band <- f.band
+            # df_ITPS <- bind_rows(df_ITPS, df_temp_h)
+            counter_ITPS = counter_ITPS + 1
+            df_ITPS[[counter_ITPS]] <- df_temp_h
+          }
+        }
+        
+        # ICPS
+        for (cluster in c("rFl", "lFl")) {
+          if (cluster=="rFl") {
+            clust <- rFl
+          } else if (cluster=="lFl") {
+            clust <- lFl
+          }
+          cond_name <- paste0(cond, ".icps.data.",f.band)
+          df_temp <- matlabFile[[cond_name]]
+          
+          for (trial_i in 1:dim(df_temp)[2]) { # This is for all the trials
+            df_temp_t <- df_temp[,trial_i,,]
+            df_temp_c <- df_temp_t[clust,,]
+            df_temp_c <- apply(df_temp_c, c(2,3), function(x) mean(x, na.rm = T)) # For each combination in the 2nd, 3rd dimensions, average over the values in the 1st - avging across electrodes
+            df_temp_h <- df_temp_c[half_i,]
+            df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+            
+            names(df_temp_h) <- "value"
+            df_temp_h$id <- id
+            df_temp_h$cond <- cond
+            df_temp_h$half <- half_i
+            df_temp_h$trial <- trial_i
+            df_temp_h$sub <- seq(1,nrow(df_temp_h))
+            df_temp_h$chan <- cluster
+            df_temp_h$f.band <- f.band
+            # df_ICPS <- bind_rows(df_ICPS, df_temp_h)
+            counter_ICPS = counter_ICPS + 1
+            df_ICPS[[counter_ICPS]] <- df_temp_h
+          }
+        }
+      }
+    }
+  }
+}
+
+dfm <- do.call(dplyr::bind_rows, df_ITPS)
+# dfm <- df_ITPS
+# No need for melting anymore
+dfm$value <- as.numeric(dfm$value) # Check for warnings
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+dfm_ITPS_reliability <- dfm
+# dfm <- dfm_ITPS_reliability
+```
+
+## ITPS 
+
+### Creating plots
+```{r}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + chan + f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag[dfm.ag$chan=="Fz",], aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "ITPS") + my_opts
+```
+
+### ITPS Reliability
+```{r}
+# Extracting time of interest
+# Delta
+Delta_itps <- dfm[dfm$f.band=="1.4" & dfm$chan=="Fz",]
+Delta_itps <- aggregate(cbind(value) ~ id_age + Condition + chan + half + trial + sub, Delta_itps, function(x) mean(x, na.rm=T))
+Delta_itps$age <- sapply(strsplit(Delta_itps$id_age,"_"), `[`, 4) 
+Delta_itps$Condition <- car::recode(Delta_itps$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_itps <- dcast(Delta_itps, id_age + trial + sub ~ Condition + chan + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_itps <- dfm[dfm$f.band=="4.8" & dfm$chan=="Fz",]
+Theta_itps <- aggregate(cbind(value) ~ id_age + Condition + chan + half + trial + sub, Theta_itps, function(x) mean(x, na.rm=T))
+Theta_itps$age <- sapply(strsplit(Theta_itps$id_age,"_"), `[`, 4) 
+Theta_itps$Condition <- car::recode(Theta_itps$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_itps <- dcast(Theta_itps, id_age + trial + sub ~ Condition + chan + age + half, mean, value.var= c("value"))
+
+
+df_itps_reliability <- merge(Delta_itps, Theta_itps, by = c("id_age", "trial", "sub"), all = T)
+
+
+library(tidyverse)
+df_itps_reliability_cor <- df_itps_reliability %>%
+  select(-id_age) %>%
+  unite(trial_sub, trial,sub) %>% 
+  split(.$trial_sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_ITPS <- data.frame()
+for (i in 1:length(df_itps_reliability_cor)) {
+  r_temp <- df_itps_reliability_cor[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_itps_reliability_cor[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j/2], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_itps_reliability_cor)[i] # Setting the subsamples
+      # r_temp_df_j$n_trials = i*4 # Setting the number that was subsampled by
+      r_temp_df_j$n_trials = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][1])*4
+      r_temp_df_j$sub = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][2])
+        
+      rel_result_ITPS <- bind_rows(rel_result_ITPS, r_temp_df_j)
+    }
+  
+}
+
+rel_result_ITPS <- rel_result_ITPS %>% 
+  group_by(variable, n_trials, n) %>%
+  summarise(rcoeff = mean(rcoeff, na.rm = T))
+
+rel_result_ITPS$rcoeff[rel_result_ITPS$n < 6] <- NA
+rel_result_ITPS$Age <- sapply(strsplit(as.character(rel_result_ITPS$variable),"_"), `[`, 4) 
+rel_result_ITPS$Age <- as.numeric(gsub("Y", "", rel_result_ITPS$Age))
+rel_result_ITPS$Condition <- paste0(sapply(strsplit(as.character(rel_result_ITPS$variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(rel_result_ITPS$variable),"_"), `[`, 2))
+rel_result_ITPS$rcoeff_fix <- ifelse(rel_result_ITPS$rcoeff <0, 0, rel_result_ITPS$rcoeff)
+
+rel_result_ITPS$Condition_fix <- recode_factor(rel_result_ITPS$Condition, !!!list('Correct_Delta'='Correct (Delta)', 'Correct_Theta'='Correct (Theta)', 
+                                                                  'Error_Delta'='Error (Delta)', 'Error_Theta'='Error (Theta)')) # Recoding for plot
+rel_result_ITPS$Age <- as.factor(rel_result_ITPS$Age)
+
+# Plotting
+(p.ITPS.rel <- ggplot(rel_result_ITPS, aes(n_trials, rcoeff_fix, color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Split-Half Reliability of ITPS")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~Condition_fix) )
+
+ggplot(rel_result_ITPS, aes(n_trials, rcoeff_fix, color = as.factor(Age), fill = as.factor(Age), group = as.factor(Age))) + geom_line() + geom_point() + my_opts+ labs(x = "Number of Trials", y = "Split-Half Reliability of ITPS")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 32), breaks = seq(0, 32, by = 4)) + theme(legend.position="bottom") + facet_wrap(~Condition_fix)
+
+# Getting the number of trials needed for a given cutoff
+dfm_r_ag_cutoff_mean <- rel_result_ITPS %>% 
+  group_by(Condition, Age) %>% # Grouping by vars of interest
+  filter(rcoeff_fix>= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_mean %>% select(n_trials, Condition, Age) %>% spread(Condition, n_trials) 
+
+
+#####   #####   #####   #####   #####   #####   #####   #####
+# Power estimates
+df_itps_cohend <- df_itps_reliability %>%
+  melt(., id.vars = c("id_age", "trial", "sub")) %>%
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(variable),"_"), `[`, 4)) %>%
+  group_by(id_age, trial, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, trial, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na() %>%
+  filter(trial<9) %>% # Doing this because we run of trials at 36 error trials for age 4 (min 6 participants)
+  group_by(trial, Age) %>%
+  summarise(n = t.test(Error_Delta, Correct_Delta, paired = T, na.rm=T)$parameter,
+    Error_Delta = cohen.d(Error_Delta, Correct_Delta, paired = T, na.rm=T)$estimate,
+            Error_Theta = cohen.d(Error_Theta, Correct_Theta, paired = T, na.rm=T)$estimate)
+
+df_itps_cohend$trial <- df_itps_cohend$trial*4
+dfm_itps_cohend <- melt(df_itps_cohend, id.vars = c("trial","Age", "n"))
+dfm_itps_cohend$Age <- as.numeric(gsub("Y", "", dfm_itps_cohend$Age))
+dfm_itps_cohend$variable_fix <- recode_factor(dfm_itps_cohend$variable, !!!list('Error_Delta'='Delta', 'Error_Theta'='Theta')) # Recoding for plot
+dfm_itps_cohend$Age <- as.factor(dfm_itps_cohend$Age)
+dfm_itps_cohend$value[dfm_itps_cohend$n < 5] <- NA
+
+# Plotting
+(p.ITPS.es <- ggplot(dfm_itps_cohend, aes(trial, value, color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Effect Size of ITPS (Cohen d)") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~variable_fix) +
+     geom_hline(yintercept=.8, color='black', linetype = 2) + geom_hline(yintercept=.5, color='black', linetype = 1) + geom_hline(yintercept=.2, color='black', linetype = 3) +
+    geom_hline(yintercept=-.8, color='black', linetype = 2) + geom_hline(yintercept=-.5, color='black', linetype = 1) + geom_hline(yintercept=-.2, color='black', linetype = 3) )
+```
+
+## ICPS 
+
+### Creating plots
+```{r}
+dfm <- do.call(dplyr::bind_rows, df_ICPS)
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+
+
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+dfm_ICPS_reliability <- dfm
+# dfm <- dfm_ICPS_reliability
+
+
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + chan + f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+
+ggplot(dfm.ag[dfm.ag$chan=="rFl",], aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "ICPS") + my_opts
+```
+
+### ICPS Reliability
+```{r}
+# Extracting time of interest
+# Delta
+Delta_icps <- dfm[dfm$f.band=="1.4",]
+Delta_icps <- aggregate(cbind(value) ~ id_age + Condition + half + trial + sub, Delta_icps, function(x) mean(x, na.rm=T))
+Delta_icps$age <- sapply(strsplit(Delta_icps$id_age,"_"), `[`, 4) 
+Delta_icps$Condition <- car::recode(Delta_icps$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_icps <- dcast(Delta_icps, id_age + trial + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_icps <- dfm[dfm$f.band=="4.8",]
+Theta_icps <- aggregate(cbind(value) ~ id_age + Condition + half + trial + sub, Theta_icps, function(x) mean(x, na.rm=T))
+Theta_icps$age <- sapply(strsplit(Theta_icps$id_age,"_"), `[`, 4) 
+Theta_icps$Condition <- car::recode(Theta_icps$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_icps <- dcast(Theta_icps, id_age + trial + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+df_icps_reliability <- merge(Delta_icps, Theta_icps, by = c("id_age", "trial","sub"), all = T)
+
+
+library(tidyverse)
+df_icps_reliability_cor <- df_icps_reliability %>%
+  select(-id_age) %>%
+  unite(trial_sub, trial,sub) %>% 
+  split(.$trial_sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_ICPS <- data.frame()
+for (i in 1:length(df_icps_reliability_cor)) {
+  r_temp <- df_icps_reliability_cor[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_icps_reliability_cor[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_icps_reliability_cor)[i] # Setting the subsamples
+      # r_temp_df_j$n_trials = i*4 # Setting the number that was subsampled by
+      r_temp_df_j$n_trials = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][1])*4
+      r_temp_df_j$sub = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][2])
+        
+      rel_result_ICPS <- bind_rows(rel_result_ICPS, r_temp_df_j)
+    }
+  
+}
+
+rel_result_ICPS <- rel_result_ICPS %>% 
+  group_by(variable, n_trials, n) %>%
+  summarise(rcoeff = mean(rcoeff, na.rm = T))
+
+rel_result_ICPS$rcoeff[rel_result_ICPS$n < 6] <- NA
+rel_result_ICPS$Age <- sapply(strsplit(as.character(rel_result_ICPS$variable),"_"), `[`, 3) 
+rel_result_ICPS$Age <- as.numeric(gsub("Y", "", rel_result_ICPS$Age))
+rel_result_ICPS$Condition <- paste0(sapply(strsplit(as.character(rel_result_ICPS$variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(rel_result_ICPS$variable),"_"), `[`, 2))
+rel_result_ICPS$rcoeff_fix <- ifelse(rel_result_ICPS$rcoeff <0, 0, rel_result_ICPS$rcoeff)
+
+rel_result_ICPS$Condition_fix <- recode_factor(rel_result_ICPS$Condition, !!!list('Correct_Delta'='Correct (Delta)', 'Correct_Theta'='Correct (Theta)', 
+                                                                  'Error_Delta'='Error (Delta)', 'Error_Theta'='Error (Theta)')) # Recoding for plot
+
+rel_result_ICPS$Age <- as.factor(rel_result_ICPS$Age)
+
+
+# Plotting
+ggplot(rel_result_ICPS, aes(n_trials, rcoeff_fix, color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Split-Half Reliability of ICPS")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="bottom", legend.title = element_blank()) + facet_wrap(~Condition)
+
+(p.ICPS.rel <- ggplot(rel_result_ICPS, aes(n_trials, rcoeff_fix, color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Split-Half Reliability of ICPS")  + geom_hline(yintercept=.9, color='black', linetype = 2) + geom_hline(yintercept=.8, color='black', linetype = 1) + geom_hline(yintercept=.7, color='black', linetype = 3) + geom_hline(yintercept=.6, color='red', linetype = 4) +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~Condition_fix) )
+
+# Getting the number of trials needed for a given cutoff
+dfm_r_ag_cutoff_mean <- rel_result_ICPS %>% 
+  group_by(Condition, Age) %>% # Grouping by vars of interest
+  filter(rcoeff_fix>= .6) %>%
+  filter(n_trials == min(n_trials)) %>%
+  ungroup()
+
+dfm_r_ag_cutoff_mean %>% select(n_trials, Condition, Age) %>% spread(Condition, n_trials) 
+
+
+#####   #####   #####   #####   #####   #####   #####   #####
+# Power estimates
+df_icps_cohend <- df_icps_reliability %>%
+  melt(., id.vars = c("id_age", "trial","sub")) %>%
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(variable),"_"), `[`, 3)) %>%
+  group_by(id_age, trial, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, trial, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na() %>%
+  filter(trial<10) %>% # Doing this because we run of trials at 36 error trials for age 4 (min 6 participants)
+  group_by(trial, Age) %>%
+  summarise(n = t.test(Error_Delta, Correct_Delta, paired = T, na.rm=T)$parameter,
+            Error_Delta = cohen.d(Error_Delta, Correct_Delta, paired = T, na.rm=T)$estimate,
+            Error_Theta = cohen.d(Error_Theta, Correct_Theta, paired = T, na.rm=T)$estimate)
+
+df_icps_cohend$trial <- df_icps_cohend$trial*4
+dfm_icps_cohend <- melt(df_icps_cohend, id.vars = c("trial","Age","n"))
+dfm_icps_cohend$Age <- as.numeric(gsub("Y", "", dfm_icps_cohend$Age))
+dfm_icps_cohend$variable_fix <- recode_factor(dfm_icps_cohend$variable, !!!list('Error_Delta'='Delta', 'Error_Theta'='Theta')) # Recoding for plot
+dfm_icps_cohend$Age <- as.factor(dfm_icps_cohend$Age)
+dfm_icps_cohend$value[dfm_icps_cohend$n < 5] <- NA
+
+
+# Plotting
+(p.ICPS.es <- ggplot(dfm_icps_cohend, aes(trial, value, color = Age, fill = Age, group = Age)) + stat_summary(fun.y = mean, geom = "point",  position=position_dodge(width=0.7)) + stat_summary(fun.y = mean, geom = "line",  aes(group = Age)) + my_opts+ labs(x = "Number of Trials", y = "Effect Size of ICPS (Cohen d)") +  scale_x_continuous(limits = c(0, 34), breaks = seq(0, 32, by = 4)) + theme(legend.position="none") + facet_wrap(~variable_fix) +
+     geom_hline(yintercept=.8, color='black', linetype = 2) + geom_hline(yintercept=.5, color='black', linetype = 1) + geom_hline(yintercept=.2, color='black', linetype = 3) +
+    geom_hline(yintercept=-.8, color='black', linetype = 2) + geom_hline(yintercept=-.5, color='black', linetype = 1) + geom_hline(yintercept=-.2, color='black', linetype = 3) )
+
+```
+
+## Checking correlations
+```{r}
+df_itps_reliability_check <- df_itps_reliability[df_itps_reliability$trial==1,]  # Selecting only one
+df_itps_reliability_check <- df_itps_reliability %>% melt(., id.vars = c("id_age", "trial","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(id_age),"_"), `[`, 4)) %>%
+   group_by(id_age, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_itps_reliability_check <- merge(df_itps_reliability_check, dfmerged[,c("id_age","Correct_Delta_itps","Correct_Theta_itps","Error_Delta_itps","Error_Theta_itps")], by = "id_age", all = T)
+corr.test(df_itps_reliability_check[-c(1:2)])
+
+
+df_icps_reliability_check <- df_icps_reliability[df_icps_reliability$trial==1,]  # Selecting only one
+df_icps_reliability_check <- df_icps_reliability %>% melt(., id.vars = c("id_age", "trial","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(id_age),"_"), `[`, 4)) %>%
+   group_by(id_age, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_icps_reliability_check <- merge(df_icps_reliability_check, dfmerged[,c("id_age","Correct_Frontal_Delta_icps","Correct_Frontal_Theta_icps","Error_Frontal_Delta_icps","Error_Frontal_Theta_icps")], by = "id_age", all = T)
+
+corr.test(df_icps_reliability_check[-c(1:2)])
+```
+
+## Overall ITPS and ICPS Reliability
+### Setup
+```{r}
+# Creating a list of the matlab files 
+tbt_data_path <- "X:/Dropboxes/moraless/ECHO/Reliability/R1_subs_300_100_All/" # This is the original baseline
+
+
+matlab_list <- list.files(path = tbt_data_path, pattern = ".mat", ignore.case = T)
+matlab_list <- matlab_list[grepl("ICPS_Reliability.mat", matlab_list)]
+
+# NOTE: because I downsampled the channels, now these are the new indices
+Fz <- c(1, 2, 5)
+rFl <- c(6, 7) # just limiting to two elecs Frontal
+lFl <- c(3, 4) # just limiting to two elecs Frontal
+
+condition <- c("correct", "error")
+# df_ITPS <- data.frame()
+# df_ICPS <- data.frame()
+df_ITPS_all <- list()
+df_ICPS_all <- list()
+counter_ITPS = 0
+counter_ICPS = 0
+for (i in 1:length(matlab_list)) {
+  
+  mat_file_name <- matlab_list[i]
+  id <- paste(sapply(strsplit(as.character(mat_file_name),"_"), `[`, 1), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 2), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 3), 
+              sapply(strsplit(as.character(mat_file_name),"_"), `[`, 4), sep = "_")
+  print(paste0("Now in ",i," ", mat_file_name))
+  matlabFile <- readMat(paste0(tbt_data_path,mat_file_name)) # Reading in matlab file
+  
+  for (cond in condition) {
+    for (half_i in 1:2) {
+      for (f.band in c("1.4", "4.8")) {
+        
+        # ITPS
+        for (cluster in c("Fz")) {
+          if (cluster=="Fz") {
+            clust <- Fz
+          } else if (cluster=="Tz") {
+            clust <- Tz
+          }
+          cond_name <- paste0(cond, ".ITPS.data.",f.band)
+          df_temp <- matlabFile[[cond_name]]
+          
+          df_temp_c <- df_temp[clust,,]
+          df_temp_c <- apply(df_temp_c, c(2,3), function(x) mean(x, na.rm = T)) # For each combination in the 2nd, 3rd dimensions, average over the values in the 1st - avging across electrodes
+          df_temp_h <- df_temp_c[half_i,]
+          df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+          
+          names(df_temp_h) <- "value"
+          df_temp_h$id <- id
+          df_temp_h$cond <- cond
+          df_temp_h$half <- half_i
+          # df_temp_h$trial <- trial_i
+          df_temp_h$sub <- seq(1,nrow(df_temp_h))
+          df_temp_h$chan <- cluster
+          df_temp_h$f.band <- f.band
+          # df_ITPS <- bind_rows(df_ITPS, df_temp_h)
+          counter_ITPS = counter_ITPS + 1
+          df_ITPS_all[[counter_ITPS]] <- df_temp_h
+        }
+        
+        # ICPS
+        for (cluster in c("rFl", "lFl")) {
+          if (cluster=="rFl") {
+            clust <- rFl
+          } else if (cluster=="lFl") {
+            clust <- lFl
+          }
+          cond_name <- paste0(cond, ".icps.data.",f.band)
+          df_temp <- matlabFile[[cond_name]]
+          
+          df_temp_c <- df_temp[clust,,]
+          df_temp_c <- apply(df_temp_c, c(2,3), function(x) mean(x, na.rm = T)) # For each combination in the 2nd, 3rd dimensions, average over the values in the 1st - avging across electrodes
+          df_temp_h <- df_temp_c[half_i,]
+          df_temp_h <- as.data.frame((unlist(df_temp_h))) # Transposing and saving as a dataframe. 
+          
+          names(df_temp_h) <- "value"
+          df_temp_h$id <- id
+          df_temp_h$cond <- cond
+          df_temp_h$half <- half_i
+          # df_temp_h$trial <- trial_i
+          df_temp_h$sub <- seq(1,nrow(df_temp_h))
+          df_temp_h$chan <- cluster
+          df_temp_h$f.band <- f.band
+          # df_ICPS <- bind_rows(df_ICPS, df_temp_h)
+          counter_ICPS = counter_ICPS + 1
+          df_ICPS_all[[counter_ICPS]] <- df_temp_h
+        }
+      }
+    }
+  }
+}
+
+
+dfm <- do.call(dplyr::bind_rows, df_ITPS_all)
+
+dfm$value <- as.numeric(dfm$value) # Check for warnings
+
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age))
+dfm_ITPS_reliability_all <- dfm
+# dfm <- dfm_ITPS_reliability
+```
+
+## ITPS 
+### Creating plots
+```{r}
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + chan + f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+# dfm.ag$Condition <- factor(dfm.ag$Condition, levels = c("Standard", "Deviant", "Novel"))
+
+ggplot(dfm.ag[dfm.ag$chan=="Fz",], aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "ITPS") + my_opts
+```
+
+### ITPS Reliability
+```{r}
+# Extracting time of interest
+# Delta
+Delta_itps <- dfm[dfm$f.band=="1.4" & dfm$chan=="Fz",]
+Delta_itps <- aggregate(cbind(value) ~ id_age + Condition + chan + half  + sub, Delta_itps, function(x) mean(x, na.rm=T))
+Delta_itps$age <- sapply(strsplit(Delta_itps$id_age,"_"), `[`, 4) 
+Delta_itps$Condition <- car::recode(Delta_itps$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_itps <- dcast(Delta_itps, id_age + sub ~ Condition + chan + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_itps <- dfm[dfm$f.band=="4.8" & dfm$chan=="Fz",]
+Theta_itps <- aggregate(cbind(value) ~ id_age + Condition + chan + half  + sub, Theta_itps, function(x) mean(x, na.rm=T))
+Theta_itps$age <- sapply(strsplit(Theta_itps$id_age,"_"), `[`, 4) 
+Theta_itps$Condition <- car::recode(Theta_itps$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_itps <- dcast(Theta_itps, id_age + sub ~ Condition + chan + age + half, mean, value.var= c("value"))
+
+
+df_itps_reliability_all <- merge(Delta_itps, Theta_itps, by = c("id_age", "sub"), all = T)
+
+
+library(tidyverse)
+df_itps_reliability_cor_all <- df_itps_reliability_all %>%
+  select(-id_age) %>%
+  split(.$sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_ITPS_all <- data.frame()
+for (i in 1:length(df_itps_reliability_cor_all)) {
+  r_temp <- df_itps_reliability_cor_all[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_itps_reliability_cor_all[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j/2], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_itps_reliability_cor)[i] # Setting the subsamples
+      r_temp_df_j$sub = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][2])
+        
+      rel_result_ITPS_all <- bind_rows(rel_result_ITPS_all, r_temp_df_j)
+    }
+  
+}
+
+rel_result_ITPS_all <- rel_result_ITPS_all %>% 
+  group_by(variable) %>%
+  summarise(rcoeff = mean(rcoeff, na.rm = T))
+
+```
+
+## ICPS 
+
+### Creating plots
+```{r}
+dfm <- do.call(dplyr::bind_rows, df_ICPS_all)
+# Relabelling condition 
+dfm$Condition <- ifelse(dfm$cond=="correct", "Correct", ifelse(dfm$cond=="error", "Error", "ERROR!"))
+dfm$id_age <- dfm$id
+dfm <- dfm[dfm$id_age %in% ids.ERPs,]
+length(unique(dfm$id_age)) 
+dfm_ICPS_reliability_all <- dfm
+# dfm <- dfm_ICPS_reliability_all
+
+
+# Plotting
+dfm.ag <- aggregate(cbind(value) ~ Condition + f.band + id_age, dfm, function(x) mean(x, na.rm=T)) # Creating an averaged dataset
+# dfm.ag$Condition <- factor(dfm.ag$Condition, levels = c("Standard", "Deviant", "Novel"))
+
+ggplot(dfm.ag, aes(x =f.band,y=value, color = Condition, fill = Condition)) + stat_summary(fun.y = mean, geom = "bar", position=position_dodge(width=0.95)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.3, position=position_dodge(width=0.95)) + labs(x = "Condition", y = "ICPS") + my_opts
+```
+
+### ICPS Reliability
+```{r}
+# Extracting time of interest
+# Delta
+Delta_icps <- dfm[dfm$f.band=="1.4",]
+Delta_icps <- aggregate(cbind(value) ~ id_age + Condition + half  + sub, Delta_icps, function(x) mean(x, na.rm=T))
+Delta_icps$age <- sapply(strsplit(Delta_icps$id_age,"_"), `[`, 4) 
+Delta_icps$Condition <- car::recode(Delta_icps$Condition, " 'Error'='Error_Delta';'Correct'='Correct_Delta'")
+Delta_icps <- dcast(Delta_icps, id_age  + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+# Theta
+Theta_icps <- dfm[dfm$f.band=="4.8",]
+Theta_icps <- aggregate(cbind(value) ~ id_age + Condition + half  + sub, Theta_icps, function(x) mean(x, na.rm=T))
+Theta_icps$age <- sapply(strsplit(Theta_icps$id_age,"_"), `[`, 4) 
+Theta_icps$Condition <- car::recode(Theta_icps$Condition, " 'Error'='Error_Theta';'Correct'='Correct_Theta'")
+Theta_icps <- dcast(Theta_icps, id_age  + sub ~ Condition + age + half, mean, value.var= c("value"))
+
+
+df_icps_reliability_all <- merge(Delta_icps, Theta_icps, by = c("id_age","sub"), all = T)
+
+
+library(tidyverse)
+df_icps_reliability_cor_all <- df_icps_reliability_all %>%
+  select(-id_age) %>%
+  split(.$sub) %>%
+  map(~corr.test(x = .x[-1], method = "pearson"))
+  
+  
+# Creating a dataset with TF
+rel_result_ICPS_all <- data.frame()
+for (i in 1:length(df_icps_reliability_cor_all)) {
+  r_temp <- df_icps_reliability_cor_all[[i]]$r
+  r_temp<- (2*r_temp)/(1 + abs(r_temp)) # SB formula
+  n_temp <- df_icps_reliability_cor_all[[i]]$n
+
+  conditions_temp <- unique(paste0(sapply(strsplit(row.names(r_temp),"_"), `[`, 1), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 2), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 3), "_", sapply(strsplit(row.names(r_temp),"_"), `[`, 4)))  
+  
+    for (j in seq(2,sqrt(length(r_temp)), 2) ) { # Setting up a loop over the number of conditions
+      r_temp_df_j <- r_temp[j,j-1]               # getting the index for that condition it is the row number and the column of j - 1
+      r_temp_df_j <- data.frame(variable = conditions_temp[j], rcoeff = r_temp_df_j) # Getting the name of the condition and it has to be divided by two - This should match the conditions and they are sorted alphabetically! 
+      r_temp_df_j$n <- ifelse(length(n_temp) == 1, n_temp, ifelse(length(n_temp) > 1, n_temp[j,j-1], "Error!")) # getting the n for that condition it is the same for all or the row number and the column of j - 1
+      r_temp_df_j$sub = names(df_icps_reliability_cor)[i] # Setting the subsamples
+      r_temp_df_j$sub = as.numeric(strsplit(r_temp_df_j$sub, "_")[[1]][2])
+        
+      rel_result_ICPS_all <- bind_rows(rel_result_ICPS_all, r_temp_df_j)
+    }
+  
+}
+
+rel_result_ICPS_all <- rel_result_ICPS_all %>% 
+  group_by(variable) %>%
+  summarise(rcoeff = mean(rcoeff, na.rm = T))
+
+```
+
+### Checking correlations
+```{r}
+df_itps_reliability_check <- df_itps_reliability_all %>% melt(., id.vars = c("id_age","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(id_age),"_"), `[`, 4)) %>%
+   group_by(id_age, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_itps_reliability_check <- merge(df_itps_reliability_check, dfmerged[,c("id_age","Correct_Delta_itps","Correct_Theta_itps","Error_Delta_itps","Error_Theta_itps")], by = "id_age", all = T)
+corr.test(df_itps_reliability_check[-c(1:2)])
+
+
+df_icps_reliability_check <- df_icps_reliability_all %>% melt(., id.vars = c("id_age","sub")) %>%  
+  mutate(Condition = paste0(sapply(strsplit(as.character(variable),"_"), `[`, 1), "_", sapply(strsplit(as.character(variable),"_"), `[`, 2)),
+         Age = sapply(strsplit(as.character(id_age),"_"), `[`, 4)) %>%
+   group_by(id_age, Condition, Age) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  pivot_wider(id_cols = c(id_age, Age), names_from = c(Condition), values_from = value) %>%
+  drop_na()
+  
+df_icps_reliability_check <- merge(df_icps_reliability_check, dfmerged[,c("id_age","Correct_Frontal_Delta_icps","Correct_Frontal_Theta_icps","Error_Frontal_Delta_icps","Error_Frontal_Theta_icps")], by = "id_age", all = T)
+
+corr.test(df_icps_reliability_check[-c(1:2)])
+```
+
+
+# Saving plots 
+```{r}
+setwd("Z:/Dropboxes/moraless/ECHO/ERN/R_Figures/")
+Sys.setenv(R_GSCMD = "C:/Program Files/gs/gs9.53.3/bin/gswin64c.exe")
+bitmap("p.erp.rel.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.erp.rel
+dev.off()
+bitmap("p.erp.es.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.erp.es
+dev.off()
+bitmap("p.power.rel.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.power.rel
+dev.off()
+bitmap("p.power.es.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.power.es
+dev.off()
+bitmap("p.ITPS.rel.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.ITPS.rel
+dev.off()
+bitmap("p.ITPS.es.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.ITPS.es
+dev.off()
+bitmap("p.ICPS.rel.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.ICPS.rel
+dev.off()
+bitmap("p.ICPS.es.R1.tiff", width = 8, height = 5, units = 'in', type="tiff24nc", res=300)
+p.ICPS.es
+dev.off()
+
+```
